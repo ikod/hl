@@ -1,0 +1,14 @@
+.dub
+docs.json
+__dummy.html
+docs/
+hl.so
+hl.dylib
+hl.dll
+hl.a
+hl.lib
+hl-test-*
+*.exe
+*.o
+*.obj
+*.lst
