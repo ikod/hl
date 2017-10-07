@@ -8,7 +8,7 @@ import std.container;
 import std.stdio;
 import std.exception;
 import std.experimental.logger;
-
+import std.algorithm.comparison: max;
 import core.sys.posix.fcntl: open, O_RDONLY;
 import core.sys.posix.unistd: close;
 
@@ -110,6 +110,7 @@ struct NativeEventLoopImpl {
             if ( in_index > 0 ) {
                 debug tracef("Flush %d events %s", in_index, in_events);
                 auto rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
+                enforce(rc>=0, "flush kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
                 in_index = 0;
             }
             debug tracef("waiting for events %s", ts);
@@ -126,7 +127,7 @@ struct NativeEventLoopImpl {
                 debug trace("kevent timedout and no events to process");
                 return;
             }
-            in_index = 0;
+            //in_index = 0;
             foreach(i; 0..ready) {
                 if ( !running ) {
                     break;
@@ -135,22 +136,33 @@ struct NativeEventLoopImpl {
                 debug tracef("got kevent[%d] %s, data: %d, udata: %0x", i, e, e.data, e.udata);
                 switch (e.filter) {
                     case EVFILT_TIMER:
-                        auto now = Clock.currTime;
+                        /*
+                         * Invariants for timers
+                         * ---------------------
+                         * timer list must not be empty at event.
+                         * we have to receive event only on the earliest timer in list
+                        */
                         assert(!timers.empty, "timers empty on timer event");
-                        //assert(timers.front._expires <= now, "%s - %s".format(timers.front, now));
-                        while ( !timers.empty && timers.front._expires <= now ) {
+                        assert(cast(Timer)e.udata == timers.front);
+                        /* */
+
+                        auto now = Clock.currTime;
+
+                        do {
                             debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
                             Timer t = timers.front;
                             HandlerDelegate h = t._handler;
                             timers.removeFront;
                             h(AppEvent.TMO);
-                        }
-                        if ( ! timers.empty ) {
                             now = Clock.currTime;
-                            _mod_kernel_timer(timers.front, timers.front._expires - now);
-                        } else {
-                            //_del_kernel_timer();
+                        } while (!timers.empty && timers.front._expires <= now );
+
+                        if ( ! timers.empty ) {
+                            Duration kernel_delta = timers.front._expires - now;
+                            assert(kernel_delta > 0.seconds);
+                            _add_kernel_timer(timers.front, kernel_delta);
                         }
+
                         break;
                     default:
                         break;
@@ -158,49 +170,49 @@ struct NativeEventLoopImpl {
             }
         }
     }
+
     void start_timer(Timer t) {
-        //debug tracef("insert timer: %s - %X", t, cast(void*)t);
-        //_add_kernel_timer(t);
         debug tracef("insert timer %s - %X", t, cast(void*)t);
-        if ( timers.empty ) {
+        if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
-            _add_kernel_timer(t, d);
-            timers.insert(t);
-            return;
-        }
-        auto next = timers.front;
-        if ( t < next ) {
-            auto d = next._expires - Clock.currTime;
-            _mod_kernel_timer(t, d);
+            d = max(d, 0.seconds);
+            if ( timers.empty ) {
+                _add_kernel_timer(t, d);
+            } else {
+                _mod_kernel_timer(t, d);
+            }
         }
         timers.insert(t);
     }
+
     void stop_timer(Timer t) {
         //debug tracef("remove timer %s", t);
         //_del_kernel_timer(t);
         debug tracef("remove timer %s", t);
 
-        if ( t == timers.front ) {
-            debug trace("we have to del this timer from kernel");
-            timers.removeFront();
-            _del_kernel_timer(t);
-            if ( ! timers.empty ) {
-                // we can change kernel timer to next if it in the future,
-                // or leave it at the front and it will fired at the next run
-                auto next = timers.front;
-                auto d = next._expires - Clock.currTime;
-                if ( d > 0.seconds ) {
-                    _mod_kernel_timer(timers.front, d);
-                }
-            }
-        } else {
-            // do not change anything in kernel
+        if ( t != timers.front ) {
             auto r = timers.equalRange(t);
             timers.remove(r);
+            return;
         }
+
+        timers.removeFront();
+        debug trace("we have to del this timer from kernel or set to next");
+        if ( !timers.empty ) {
+            // we can change kernel timer to next,
+            // If next timer expired - set delta = 0 to run on next loop invocation
+            auto next = timers.front;
+            auto d = next._expires - Clock.currTime;
+            d = max(d, 0.seconds);
+            _mod_kernel_timer(timers.front, d);
+            return;
+        }
+        _del_kernel_timer(t);
     }
+
     void _add_kernel_timer(in Timer t, in Duration d) {
-        debug tracef("add kernel timer %s", t);
+        debug tracef("add kernel timer %s, delta %s", t, d);
+        assert(d >= 0.seconds);
         intptr_t delay_ms = d.split!"msecs".msecs;
         kevent_t e;
         e.ident = 0;
