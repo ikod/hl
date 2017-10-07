@@ -160,7 +160,9 @@ struct NativeEventLoopImpl {
                         if ( ! timers.empty ) {
                             Duration kernel_delta = timers.front._expires - now;
                             assert(kernel_delta > 0.seconds);
-                            _add_kernel_timer(timers.front, kernel_delta);
+                            _mod_kernel_timer(timers.front, kernel_delta);
+                        } else {
+                            // kqueue do not require deletion here
                         }
 
                         break;
@@ -207,7 +209,7 @@ struct NativeEventLoopImpl {
             _mod_kernel_timer(timers.front, d);
             return;
         }
-        _del_kernel_timer(t);
+        _del_kernel_timer();
     }
 
     void _add_kernel_timer(in Timer t, in Duration d) {
@@ -229,7 +231,7 @@ struct NativeEventLoopImpl {
         in_events[in_index++] = e;
     }
     alias _mod_kernel_timer = _add_kernel_timer;
-    void _del_kernel_timer(in Timer t) {
+    void _del_kernel_timer() {
         debug trace("del kernel timer");
         kevent_t e;
         e.ident = 0;

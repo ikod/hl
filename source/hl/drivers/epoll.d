@@ -7,7 +7,7 @@ import std.string;
 import std.container;
 import std.exception;
 import std.experimental.logger;
-
+import std.algorithm.comparison: max;
 import core.stdc.string: strerror;
 import core.stdc.errno: errno;
 
@@ -69,21 +69,35 @@ struct NativeEventLoopImpl {
                     auto e = events[i];
                     debug tracef("got event %s", e);
                     if ( e.data.fd == timer_fd ) {
-                        ubyte[8] v;
-                        read(timer_fd, &v[0], 8);
+                        // with EPOLLET flag I dont have to read from timerfd
+                        //ubyte[8] v;
+                        //read(timer_fd, &v[0], 8);
+
                         auto now = Clock.currTime;
+                        /*
+                         * Invariants for timers
+                         * ---------------------
+                         * timer list must not be empty at event.
+                         * we have to receive event only on the earliest timer in list
+                        **/
                         assert(!timers.empty, "timers empty on timer event");
                         assert(timers.front._expires <= now);
-                        while ( !timers.empty && timers.front._expires <= now ) {
+
+                        do {
                             debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
                             Timer t = timers.front;
                             HandlerDelegate h = t._handler;
                             timers.removeFront;
                             h(AppEvent.TMO);
-                        }
+                            now = Clock.currTime;
+                        } while (!timers.empty && timers.front._expires <= now );
+
                         if ( ! timers.empty ) {
-                            _mod_kernel_timer(timers.front, timers.front._expires - now);
+                            Duration kernel_delta = timers.front._expires - now;
+                            assert(kernel_delta > 0.seconds);
+                            _mod_kernel_timer(timers.front, kernel_delta);
                         } else {
+                            // delete kernel timer so we can add it next time
                             _del_kernel_timer();
                         }
                         continue;
@@ -97,57 +111,56 @@ struct NativeEventLoopImpl {
     }
     void start_timer(Timer t) {
         debug tracef("insert timer %s - %X", t, cast(void*)t);
-        if ( timers.empty ) {
-            _add_kernel_timer(t);
-            timers.insert(t);
-            return;
-        }
-        if ( t < timers.front ) {
+        if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
-            _mod_kernel_timer(t, d);
+            d = max(d, 0.seconds);
+            if ( timers.empty ) {
+                _add_kernel_timer(t, d);
+            } else {
+                _mod_kernel_timer(t, d);
+            }
         }
         timers.insert(t);
     }
+
     void stop_timer(Timer t) {
         debug tracef("remove timer %s", t);
-        assert(timer_fd>=0, "Timer file is not opened");
 
-        if ( t == timers.front ) {
-            debug trace("we have to del this timer from kernel");
-            timers.removeFront();
-            if ( ! timers.empty ) {
-                // we can change kernel timer to next if it in the future,
-                // or leave it at the front and it will fired at the next run
-                auto next = timers.front;
-                auto d = next._expires - Clock.currTime;
-                if ( d > 0.seconds ) {
-                    _mod_kernel_timer(timers.front, d);
-                }
-            } else {
-                // no next timers - just delete it from kernel
-                _del_kernel_timer();
-            }
-        } else {
-            // do not change anything in kernel
+        if ( t != timers.front ) {
             auto r = timers.equalRange(t);
             timers.remove(r);
+            return;
         }
+
+        timers.removeFront();
+        debug trace("we have to del this timer from kernel or set to next");
+        if ( !timers.empty ) {
+            // we can change kernel timer to next,
+            // If next timer expired - set delta = 0 to run on next loop invocation
+            auto next = timers.front;
+            auto d = next._expires - Clock.currTime;
+            d = max(d, 0.seconds);
+            _mod_kernel_timer(timers.front, d);
+            return;
+        }
+        _del_kernel_timer();
     }
-    void _add_kernel_timer(in Timer t) {
+
+    void _add_kernel_timer(Timer t, in Duration d) {
         debug trace("add kernel timer");
         itimerspec itimer;
-        auto d = t._expires - Clock.currTime;
-        itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) d.split!("seconds", "nsecs")().seconds;
-        itimer.it_value.tv_nsec = cast(typeof(itimer.it_value.tv_nsec)) d.split!("seconds", "nsecs")().nsecs;
+        auto ds = d.split!("seconds", "nsecs");
+        itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) ds.seconds;
+        itimer.it_value.tv_nsec = cast(typeof(itimer.it_value.tv_nsec)) ds.nsecs;
         int rc = timerfd_settime(timer_fd, 0, &itimer, null);
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
-        e.events = EPOLLIN;
+        e.events = EPOLLIN|EPOLLET;
         e.data.fd = timer_fd;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
     }
-    void _mod_kernel_timer(in Timer t, in Duration d) {
+    void _mod_kernel_timer(Timer t, in Duration d) {
         debug tracef("mod kernel timer to %s", t);
         itimerspec itimer;
         auto ds = d.split!("seconds", "nsecs");
@@ -156,7 +169,7 @@ struct NativeEventLoopImpl {
         int rc = timerfd_settime(timer_fd, 0, &itimer, null);
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
-        e.events = EPOLLIN;
+        e.events = EPOLLIN|EPOLLET;
         e.data.fd = timer_fd;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, timer_fd, &e);
         enforce(rc >= 0);
@@ -165,7 +178,6 @@ struct NativeEventLoopImpl {
         debug trace("del kernel timer");
         epoll_event e;
         e.events = EPOLLIN;
-        e.data.fd = timer_fd;
         e.data.fd = timer_fd;
         int rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl del(%s): %s".format(e, fromStringz(strerror(errno))));
