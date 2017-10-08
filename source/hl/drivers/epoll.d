@@ -48,13 +48,27 @@ struct NativeEventLoopImpl {
         timer_fd = -1;
         timers = null;
     }
+
     void stop() {
         running = false;
     }
+
+    /**
+    *
+    **/
     void run(Duration d) {
+
         running = true;
-        int timeout_ms = cast(int)d.total!"msecs";
+
+        SysTime deadline = Clock.currTime + d;
+        debug tracef("evl run for %s", d);
+
         while( running ) {
+            Duration delta = deadline - Clock.currTime;
+            delta = max(delta, 1.msecs); // TODO
+
+            int timeout_ms = cast(int)delta.total!"msecs";
+
             uint ready = epoll_wait(epoll_fd, &events[0], MAXEVENTS, timeout_ms);
             if ( ready == 0 ) {
                 debug trace("epoll timedout and no events to process");
@@ -119,7 +133,7 @@ struct NativeEventLoopImpl {
         t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
-            d = max(d, 0.seconds);
+            d = max(d, 100.hnsecs); // TODO
             if ( timers.empty ) {
                 _add_kernel_timer(t, d);
             } else {

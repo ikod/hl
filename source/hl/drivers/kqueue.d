@@ -58,7 +58,7 @@ import hl.events;
 
 struct NativeEventLoopImpl {
     immutable bool   native = true;
-    immutable string _name = "OSX";
+    immutable string _name = "kqueue";
     @disable this(this) {};
     private {
         bool running = true;
@@ -98,10 +98,10 @@ struct NativeEventLoopImpl {
         debug tracef("evl run for %s", d);
 
         while(running) {
+
             Duration delta = deadline - Clock.currTime;
-            if ( delta < 0.seconds ) {
-                delta = 0.seconds;
-            }
+            delta = max(delta, 0.seconds);
+
             auto ds = delta.split!("seconds", "nsecs");
             timespec ts = {
                 tv_sec:  cast(typeof(timespec.tv_sec))ds.seconds,

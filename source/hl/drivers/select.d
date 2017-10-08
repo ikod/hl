@@ -4,7 +4,7 @@ import std.datetime;
 import std.container;
 import std.experimental.logger;
 import std.string;
-
+import std.algorithm.comparison: max;
 version(Windows) {
     import core.sys.windows.winsock2;
 }
@@ -59,10 +59,7 @@ struct FallbackEventLoopImpl {
             } else {
                 d = deadline - now;
             }
-            if ( d < 0.seconds ) {
-                debug trace("deadline reached");
-                return;
-            }
+            d = max(d, 0.seconds);
             auto converted = d.split!("seconds", "usecs");
             tv.tv_sec  = cast(typeof(tv.tv_sec))converted.seconds;
             tv.tv_usec = cast(typeof(tv.tv_usec))converted.usecs;

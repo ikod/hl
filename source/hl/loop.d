@@ -81,6 +81,7 @@ unittest {
 }
 
 unittest {
+    globalLogLevel = LogLevel.info;
     import std.stdio;
     int i1, i2;
     auto loop = getEventLoop();
@@ -133,15 +134,22 @@ unittest {
         assert(i2==0);
     }
     {
+        /** stop event loop inside from timer **/
+        info("stop event loop inside from timer");
         auto now = Clock.currTime;
-        Timer a = new Timer(now + 500.msecs, (AppEvent e){
+        i1 = 0;
+        Timer a = new Timer(now + 10.msecs, (AppEvent e){
             fallback_loop.stop();
         });
+        Timer b = new Timer(550.msecs, h1);
         fallback_loop.startTimer(a);
+        fallback_loop.startTimer(b);
         fallback_loop.run();
+        assert(i1 == 0);
     }
     {
-        trace("test order");
+        /** test timer execution order **/
+        info("timer execution order");
         auto now = Clock.currTime;
         int[] seq;
         HandlerDelegate sh1 = delegate void(AppEvent e) {seq ~= 1;};
@@ -166,6 +174,8 @@ unittest {
         assert(seq == [3, 1, 2, 3, 1 ,2]);
     }
     {
+        /** test exception handling in timer **/
+        info("exception handling in timer");
         HandlerDelegate throws = delegate void(AppEvent e){throw new Exception("test exception");};
         Timer a = new Timer(50.msecs, throws);
         loop.startTimer(a);
@@ -178,5 +188,34 @@ unittest {
         globalLogLevel = LogLevel.fatal;
         fallback_loop.run(100.msecs);
         globalLogLevel = logLevel;
+    }
+    {
+        /** overdue timers handling **/
+        info("test overdue timers handling");
+        import core.thread;
+        int[]   seq;
+        auto    slow = delegate void(AppEvent e) {Thread.sleep(20.msecs); seq ~= 1;};
+        auto    fast = delegate void(AppEvent e) {seq ~= 2;};
+        Timer a = new Timer(50.msecs, slow);
+        Timer b = new Timer(60.msecs, fast);
+        loop.startTimer(a);
+        loop.startTimer(b);
+        loop.run(100.msecs);
+        assert(seq == [1,2]);
+        a = new Timer(50.msecs, slow);
+        b = new Timer(60.msecs, fast);
+        fallback_loop.startTimer(a);
+        fallback_loop.startTimer(b);
+        fallback_loop.run(100.msecs);
+        assert(seq == [1, 2, 1, 2]);
+
+        a = new Timer(-5.seconds, fast);
+        loop.startTimer(a);
+        loop.run(0.seconds);
+
+        a = new Timer(-5.seconds, fast);
+        fallback_loop.startTimer(a);
+        fallback_loop.run(0.seconds);
+        assert(seq == [1,2,1,2,2,2]);
     }
 }
