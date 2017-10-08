@@ -3,6 +3,7 @@ module hl.drivers.select;
 import std.datetime;
 import std.container;
 import std.experimental.logger;
+import std.string;
 
 version(Windows) {
     import core.sys.windows.winsock2;
@@ -10,6 +11,9 @@ version(Windows) {
 version(Posix) {
     import core.sys.posix.sys.select;
 }
+
+import core.stdc.string: strerror;
+import core.stdc.errno: errno;
 
 import hl.events;
 
@@ -55,6 +59,10 @@ struct FallbackEventLoopImpl {
             } else {
                 d = deadline - now;
             }
+            if ( d < 0.seconds ) {
+                debug trace("deadline reached");
+                return;
+            }
             auto converted = d.split!("seconds", "usecs");
             tv.tv_sec  = cast(typeof(tv.tv_sec))converted.seconds;
             tv.tv_usec = cast(typeof(tv.tv_usec))converted.usecs;
@@ -64,17 +72,41 @@ struct FallbackEventLoopImpl {
             FD_ZERO(&err_fds);
 
             auto ready = select(fdmax+1, &read_fds, &write_fds, null, &tv);
+            debug tracef("returned %d events", ready);
+            if ( ready < 0 ) {
+                errorf("select returned error %s", fromStringz(strerror(errno)));
+                return;
+            }
             if ( ready == 0 ) {
                 // timeout
                 if ( timers.empty ) {
                     debug trace("select timedout and no timers active");
                     return;
                 }
-                auto _t = timers.front;
-                debug tracef("processing %s, lag: %s", _t, Clock.currTime - _t._expires);
-                timers.removeFront;
-                HandlerDelegate h = _t._handler;
-                h(AppEvent.TMO);
+                /*
+                 * Invariants for timers
+                 * ---------------------
+                 * timer list must not be empty at event.
+                 * we have to receive event only on the earliest timer in list
+                */
+                assert(!timers.empty, "timers empty on timer event");
+                /* */
+
+                now = Clock.currTime;
+
+                do {
+                    debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
+                    Timer t = timers.front;
+                    HandlerDelegate h = t._handler;
+                    timers.removeFront;
+                    try {
+                        h(AppEvent.TMO);
+                    } catch (Exception e) {
+                        errorf("Uncaught exception: %s", e);
+                    }
+                    now = Clock.currTime;
+                } while (!timers.empty && timers.front._expires <= now );
+
             }
         }
     }

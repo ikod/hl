@@ -153,7 +153,11 @@ struct NativeEventLoopImpl {
                             Timer t = timers.front;
                             HandlerDelegate h = t._handler;
                             timers.removeFront;
-                            h(AppEvent.TMO);
+                            try {
+                                h(AppEvent.TMO);
+                            } catch (Exception e) {
+                                errorf("Uncaught exception: %s", e);
+                            }
                             now = Clock.currTime;
                         } while (!timers.empty && timers.front._expires <= now );
 

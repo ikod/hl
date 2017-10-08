@@ -17,7 +17,15 @@ alias HandlerDelegate = void delegate(AppEvent);
 
 private static ulong timer_id = 1000;
 
-final class Timer {
+class CanPoll {
+    union Id {
+        int     fd;
+    };
+
+    Id  id;
+}
+
+final class Timer: CanPoll {
     package {
         immutable ulong           _id;
         immutable SysTime         _expires;

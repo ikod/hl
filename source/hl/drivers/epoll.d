@@ -68,7 +68,8 @@ struct NativeEventLoopImpl {
                 foreach(i; 0..ready) {
                     auto e = events[i];
                     debug tracef("got event %s", e);
-                    if ( e.data.fd == timer_fd ) {
+                    CanPoll p = cast(CanPoll)e.data.ptr;
+                    if ( p.id.fd == timer_fd ) {
                         // with EPOLLET flag I dont have to read from timerfd
                         //ubyte[8] v;
                         //read(timer_fd, &v[0], 8);
@@ -88,7 +89,11 @@ struct NativeEventLoopImpl {
                             Timer t = timers.front;
                             HandlerDelegate h = t._handler;
                             timers.removeFront;
-                            h(AppEvent.TMO);
+                            try {
+                                h(AppEvent.TMO);
+                            } catch (Exception e) {
+                                errorf("Uncaught exception: %s", e);
+                            }
                             now = Clock.currTime;
                         } while (!timers.empty && timers.front._expires <= now );
 
@@ -111,6 +116,7 @@ struct NativeEventLoopImpl {
     }
     void start_timer(Timer t) {
         debug tracef("insert timer %s - %X", t, cast(void*)t);
+        t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
             d = max(d, 0.seconds);
@@ -156,7 +162,7 @@ struct NativeEventLoopImpl {
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
         e.events = EPOLLIN|EPOLLET;
-        e.data.fd = timer_fd;
+        e.data.ptr = cast(void*)t;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
     }
@@ -170,7 +176,7 @@ struct NativeEventLoopImpl {
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
         e.events = EPOLLIN|EPOLLET;
-        e.data.fd = timer_fd;
+        e.data.ptr = cast(void*)t;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, timer_fd, &e);
         enforce(rc >= 0);
     }

@@ -83,6 +83,9 @@ unittest {
 unittest {
     import std.stdio;
     int i1, i2;
+    auto loop = getEventLoop();
+    auto fallback_loop = getFallBackEventLoop();
+
     HandlerDelegate h1 = delegate void(AppEvent e) {tracef("h1 called");i1++;};
     HandlerDelegate h2 = delegate void(AppEvent e) {tracef("h2 called");i2++;};
     {
@@ -99,38 +102,43 @@ unittest {
     }
     {
         auto now = Clock.currTime;
-        auto fl = getFallBackEventLoop();
         i1 = i2 = 0;
         Timer a = new Timer(now + 100.msecs, h1);
         Timer b = new Timer(now + 1000.msecs, h2);
-        fl.startTimer(a);
-        fl.startTimer(b);
-        fl.stopTimer(b);
-        fl.run(1500.msecs);
+        fallback_loop.startTimer(a);
+        fallback_loop.startTimer(b);
+        fallback_loop.stopTimer(b);
+        fallback_loop.run(1500.msecs);
         assert(i1==1);
         assert(i2==0);
     }
     {
         auto now = Clock.currTime;
-        auto l = getEventLoop();
         i1 = i2 = 0;
         Timer a = new Timer(now + 100.msecs, h1);
         Timer b = new Timer(now + 1000.msecs, h2);
-        l.startTimer(a);
-        l.startTimer(b);
-        l.stopTimer(b);
-        l.run(1500.msecs);
+        loop.startTimer(a);
+        loop.startTimer(b);
+        loop.stopTimer(b);
+        loop.run(1500.msecs);
         assert(i1==1);
+        assert(i2==0);
+        a = new Timer(100.msecs, h1);
+        b = new Timer(1000.msecs, h2);
+        fallback_loop.startTimer(a);
+        fallback_loop.startTimer(b);
+        fallback_loop.stopTimer(b);
+        fallback_loop.run(1500.msecs);
+        assert(i1==2);
         assert(i2==0);
     }
     {
         auto now = Clock.currTime;
-        auto fl = getFallBackEventLoop();
         Timer a = new Timer(now + 500.msecs, (AppEvent e){
-            fl.stop();
+            fallback_loop.stop();
         });
-        fl.startTimer(a);
-        fl.run();
+        fallback_loop.startTimer(a);
+        fallback_loop.run();
     }
     {
         trace("test order");
@@ -143,10 +151,32 @@ unittest {
         Timer a = new Timer(now + 500.msecs, sh1);
         Timer b = new Timer(now + 500.msecs, sh2);
         Timer c = new Timer(now + 300.msecs, sh3);
-        eventLoop.startTimer(a);
-        eventLoop.startTimer(b);
-        eventLoop.startTimer(c);
-        eventLoop.run(510.msecs);
+        loop.startTimer(a);
+        loop.startTimer(b);
+        loop.startTimer(c);
+        loop.run(510.msecs);
         assert(seq == [3, 1, 2]);
+        a = new Timer(500.msecs, sh1);
+        b = new Timer(500.msecs, sh2);
+        c = new Timer(300.msecs, sh3);
+        fallback_loop.startTimer(a);
+        fallback_loop.startTimer(b);
+        fallback_loop.startTimer(c);
+        fallback_loop.run(510.msecs);
+        assert(seq == [3, 1, 2, 3, 1 ,2]);
+    }
+    {
+        HandlerDelegate throws = delegate void(AppEvent e){throw new Exception("test exception");};
+        Timer a = new Timer(50.msecs, throws);
+        loop.startTimer(a);
+        auto logLevel = globalLogLevel;
+        globalLogLevel = LogLevel.fatal;
+        loop.run(100.msecs);
+        globalLogLevel = logLevel;
+        a = new Timer(50.msecs, throws);
+        fallback_loop.startTimer(a);
+        globalLogLevel = LogLevel.fatal;
+        fallback_loop.run(100.msecs);
+        globalLogLevel = logLevel;
     }
 }
