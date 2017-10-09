@@ -30,7 +30,6 @@ struct NativeEventLoopImpl {
 
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
-
     }
     @disable this(this) {};
     void initialize() {
@@ -65,8 +64,20 @@ struct NativeEventLoopImpl {
         debug tracef("evl run for %s", d);
 
         while( running ) {
+            while (!overdue.empty) {
+                // execute timers with requested negative delay
+                Timer t = overdue[0];
+                overdue = overdue[1..$];
+                debug tracef("execute overdue %s", t);
+                HandlerDelegate h = t._handler;
+                try {
+                    h(AppEvent.TMO);
+                } catch (Exception e) {
+                    errorf("Uncaught exception: %s", e);
+                }
+            }
             Duration delta = deadline - Clock.currTime;
-            delta = max(delta, 1.msecs); // XXX because startTimer can't add 0.seconds timer (minimum 100.hnsecs)
+            delta = max(delta, 0.seconds);
 
             int timeout_ms = cast(int)delta.total!"msecs";
 
@@ -134,7 +145,11 @@ struct NativeEventLoopImpl {
         t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
-            d = max(d, 100.hnsecs); // XXX add/mod kernel timer with 0.seconds disable timer
+            d = max(d, 0.seconds);
+            if ( d == 0.seconds ) {
+                overdue ~= t;
+                return;
+            }
             if ( timers.empty ) {
                 _add_kernel_timer(t, d);
             } else {
@@ -169,6 +184,7 @@ struct NativeEventLoopImpl {
 
     void _add_kernel_timer(Timer t, in Duration d) {
         debug trace("add kernel timer");
+        assert(d > 0.seconds);
         itimerspec itimer;
         auto ds = d.split!("seconds", "nsecs");
         itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) ds.seconds;
@@ -183,6 +199,7 @@ struct NativeEventLoopImpl {
     }
     void _mod_kernel_timer(Timer t, in Duration d) {
         debug tracef("mod kernel timer to %s", t);
+        assert(d > 0.seconds);
         itimerspec itimer;
         auto ds = d.split!("seconds", "nsecs");
         itimer.it_value.tv_sec = cast(typeof(itimer.it_value.tv_sec)) ds.seconds;

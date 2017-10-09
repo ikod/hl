@@ -71,6 +71,7 @@ struct NativeEventLoopImpl {
         kevent_t[MAXEVENTS] out_events;
 
         RedBlackTree!Timer      timers;
+        Timer[]                 overdue;    // timers added with expiration in past
 
     }
     void initialize() {
@@ -98,6 +99,18 @@ struct NativeEventLoopImpl {
         debug tracef("evl run for %s", d);
 
         while(running) {
+            while (!overdue.empty) {
+                // execute timers with requested negative delay
+                Timer t = overdue[0];
+                overdue = overdue[1..$];
+                debug tracef("execute overdue %s", t);
+                HandlerDelegate h = t._handler;
+                try {
+                    h(AppEvent.TMO);
+                } catch (Exception e) {
+                    errorf("Uncaught exception: %s", e);
+                }
+            }
 
             Duration delta = deadline - Clock.currTime;
             delta = max(delta, 0.seconds);
@@ -182,6 +195,10 @@ struct NativeEventLoopImpl {
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
             d = max(d, 0.seconds);
+            if ( d == 0.seconds ) {
+                overdue ~= t;
+                return;
+            }
             if ( timers.empty ) {
                 _add_kernel_timer(t, d);
             } else {
@@ -218,7 +235,7 @@ struct NativeEventLoopImpl {
 
     void _add_kernel_timer(in Timer t, in Duration d) {
         debug tracef("add kernel timer %s, delta %s", t, d);
-        assert(d >= 0.seconds);
+        assert(d > 0.seconds);
         intptr_t delay_ms = d.split!"msecs".msecs;
         kevent_t e;
         e.ident = 0;

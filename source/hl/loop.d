@@ -217,5 +217,46 @@ unittest {
         fallback_loop.startTimer(a);
         fallback_loop.run(0.seconds);
         assert(seq == [1,2,1,2,2,2]);
+
+        //globalLogLevel = LogLevel.trace;
+        seq = new int[](0);
+        /** test setting overdue timer inside from overdue timer **/
+        auto set_next = delegate void(AppEvent e) {
+            b = new Timer(-10.seconds, fast);
+            loop.startTimer(b);
+        };
+        a = new Timer(-5.seconds, set_next);
+        loop.startTimer(a);
+        loop.run(10.msecs);
+        assert(seq == [2]);
+
+        set_next = delegate void(AppEvent e) {
+            b = new Timer(-10.seconds, fast);
+            fallback_loop.startTimer(b);
+        };
+        a = new Timer(-5.seconds, set_next);
+        fallback_loop.startTimer(a);
+        fallback_loop.run(10.msecs);
+        assert(seq == [2,2]);
+
+        seq = new int[](0);
+        /** test setting overdue timer inside from normal timer **/
+        set_next = delegate void(AppEvent e) {
+            b = new Timer(-10.seconds, fast);
+            loop.startTimer(b);
+        };
+        a = new Timer(50.msecs, set_next);
+        loop.startTimer(a);
+        loop.run(60.msecs);
+        assert(seq == [2]);
+
+        set_next = delegate void(AppEvent e) {
+            b = new Timer(-10.seconds, fast);
+            fallback_loop.startTimer(b);
+        };
+        a = new Timer(50.msecs, set_next);
+        fallback_loop.startTimer(a);
+        fallback_loop.run(60.msecs);
+        assert(seq == [2,2]);
     }
 }
