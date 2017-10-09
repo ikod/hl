@@ -64,7 +64,7 @@ struct NativeEventLoopImpl {
         debug tracef("evl run for %s", d);
 
         while( running ) {
-            while (!overdue.empty) {
+            while (overdue.length > 0) {
                 // execute timers with requested negative delay
                 Timer t = overdue[0];
                 overdue = overdue[1..$];
