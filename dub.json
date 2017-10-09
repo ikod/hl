@@ -1,9 +1,9 @@
 {
-	"name": "hl",
-	"authors": [
-		"Igor Khasilev"
-	],
-	"description": "A minimal D application.",
-	"license": "proprietary",
+    "name": "hl",
+    "authors": [
+        "Igor Khasilev"
+    ],
+    "description": "A minimal D application.",
+    "license": "proprietary",
     "targetType": "library"
 }

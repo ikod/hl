@@ -29,6 +29,7 @@ struct NativeEventLoopImpl {
         align(1)                epoll_event[MAXEVENTS] events;
 
         RedBlackTree!Timer      timers;
+        Timer[]                 overdue;    // timers added with expiration in past
 
     }
     @disable this(this) {};
@@ -65,7 +66,7 @@ struct NativeEventLoopImpl {
 
         while( running ) {
             Duration delta = deadline - Clock.currTime;
-            delta = max(delta, 1.msecs); // TODO
+            delta = max(delta, 1.msecs); // XXX because startTimer can't add 0.seconds timer (minimum 100.hnsecs)
 
             int timeout_ms = cast(int)delta.total!"msecs";
 
@@ -133,7 +134,7 @@ struct NativeEventLoopImpl {
         t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
-            d = max(d, 100.hnsecs); // TODO
+            d = max(d, 100.hnsecs); // XXX add/mod kernel timer with 0.seconds disable timer
             if ( timers.empty ) {
                 _add_kernel_timer(t, d);
             } else {
