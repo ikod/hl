@@ -102,18 +102,7 @@ unittest {
         assert(b>a);
     }
     {
-        auto now = Clock.currTime;
-        i1 = i2 = 0;
-        Timer a = new Timer(now + 100.msecs, h1);
-        Timer b = new Timer(now + 1000.msecs, h2);
-        fallback_loop.startTimer(a);
-        fallback_loop.startTimer(b);
-        fallback_loop.stopTimer(b);
-        fallback_loop.run(1500.msecs);
-        assert(i1==1);
-        assert(i2==0);
-    }
-    {
+        /** test startTimer, and then stopTimer before runLoop */
         auto now = Clock.currTime;
         i1 = i2 = 0;
         Timer a = new Timer(now + 100.msecs, h1);
@@ -121,7 +110,7 @@ unittest {
         loop.startTimer(a);
         loop.startTimer(b);
         loop.stopTimer(b);
-        loop.run(1500.msecs);
+        loop.run(200.msecs);
         assert(i1==1);
         assert(i2==0);
         a = new Timer(100.msecs, h1);
@@ -129,7 +118,7 @@ unittest {
         fallback_loop.startTimer(a);
         fallback_loop.startTimer(b);
         fallback_loop.stopTimer(b);
-        fallback_loop.run(1500.msecs);
+        fallback_loop.run(200.msecs);
         assert(i1==2);
         assert(i2==0);
     }
@@ -137,17 +126,32 @@ unittest {
         /** stop event loop inside from timer **/
         info("stop event loop inside from timer");
         auto now = Clock.currTime;
+        Timer a, b;
+
         i1 = 0;
-        Timer a = new Timer(now + 10.msecs, (AppEvent e){
+        a = new Timer(10.msecs, (AppEvent e){
+            loop.stop();
+        });
+        b = new Timer(110.msecs, h1);
+        loop.startTimer(a);
+        loop.startTimer(b);
+        loop.run();
+        assert(i1 == 0);
+        loop.stopTimer(b);
+
+        i1 = 0;
+        a = new Timer(10.msecs, (AppEvent e){
             fallback_loop.stop();
         });
-        Timer b = new Timer(550.msecs, h1);
+        b = new Timer(110.msecs, h1);
         fallback_loop.startTimer(a);
         fallback_loop.startTimer(b);
         fallback_loop.run();
         assert(i1 == 0);
+        fallback_loop.stopTimer(b);
     }
     {
+        //globalLogLevel = LogLevel.trace;
         /** test timer execution order **/
         info("timer execution order");
         auto now = Clock.currTime;
@@ -258,5 +262,28 @@ unittest {
         fallback_loop.startTimer(a);
         fallback_loop.run(60.msecs);
         assert(seq == [2,2]);
+    }
+    {
+        import core.thread;
+        /** test pending timer events **/
+        info("test pending timer events");
+        i1 = 0;
+        auto a = new Timer(50.msecs, h1);
+        loop.startTimer(a);
+        loop.run(10.msecs);
+        assert(i1==0);
+        Thread.sleep(45.msecs);
+        loop.run(0.seconds);
+        assert(i1==1);
+
+
+        i1 = 0;
+        a = new Timer(50.msecs, h1);
+        fallback_loop.startTimer(a);
+        fallback_loop.run(10.msecs);
+        assert(i1==0);
+        Thread.sleep(45.msecs);
+        fallback_loop.run(0.seconds);
+        assert(i1==1);
     }
 }

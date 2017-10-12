@@ -92,15 +92,35 @@ struct NativeEventLoopImpl {
     void stop() {
         running = false;
     }
+
+    timespec* _calculate_timespec(SysTime deadline, timespec* ts) {
+        Duration delta = deadline - Clock.currTime;
+        delta = max(delta, 0.seconds);
+        debug tracef("delta = %s", delta);
+        auto ds = delta.split!("seconds", "nsecs");
+        ts.tv_sec = cast(typeof(timespec.tv_sec))ds.seconds;
+        ts.tv_nsec = cast(typeof(timespec.tv_nsec))ds.nsecs;
+        return ts;
+    }
+
     void run(Duration d) {
         running = true;
 
-        SysTime deadline = Clock.currTime + d;
+        immutable bool runIndefinitely = (d == Duration.max);
+        SysTime     deadline;
+        timespec    ts;
+        timespec*   wait;
+
+        if ( !runIndefinitely ) {
+            deadline = Clock.currTime + d;
+        }
+
         debug tracef("evl run for %s", d);
 
         while(running) {
+
             while (overdue.length > 0) {
-                // execute timers with requested negative delay
+                // execute timers which user requested with negative delay
                 Timer t = overdue[0];
                 overdue = overdue[1..$];
                 debug tracef("execute overdue %s", t);
@@ -112,30 +132,27 @@ struct NativeEventLoopImpl {
                 }
             }
 
-            Duration delta = deadline - Clock.currTime;
-            delta = max(delta, 0.seconds);
-
-            auto ds = delta.split!("seconds", "nsecs");
-            timespec ts = {
-                tv_sec:  cast(typeof(timespec.tv_sec))ds.seconds,
-                tv_nsec: cast(typeof(timespec.tv_nsec))ds.nsecs
-            };
             if ( in_index > 0 ) {
                 debug tracef("Flush %d events %s", in_index, in_events);
                 auto rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
                 enforce(rc>=0, "flush kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
                 in_index = 0;
             }
-            debug tracef("waiting for events %s", ts);
+
+            wait = runIndefinitely ?
+                      null
+                    : _calculate_timespec(deadline, &ts);
+
+            debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
             int ready = kevent(kqueue_fd,
                                 cast(kevent_t*)&in_events[0], in_index,
                                 cast(kevent_t*)&out_events[0], MAXEVENTS,
-                                &ts);
+                                wait);
             debug tracef("kevent returned %d events", ready);
             if ( ready < 0 ) {
                 errorf("kevent returned error %s", fromStringz(strerror(errno)));
-                return;
             }
+            enforce(ready >= 0);
             if ( ready == 0 ) {
                 debug trace("kevent timedout and no events to process");
                 return;

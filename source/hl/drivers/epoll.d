@@ -53,17 +53,30 @@ struct NativeEventLoopImpl {
         running = false;
     }
 
+    int _calculate_timeout(SysTime deadline) {
+        Duration delta = deadline - Clock.currTime;
+        delta = max(delta, 0.seconds);
+        return cast(int)delta.total!"msecs";
+    }
     /**
     *
     **/
     void run(Duration d) {
 
         running = true;
+        immutable bool runIndefinitely = (d == Duration.max);
 
+        /**
+         * eventloop will exit when we reach deadline
+         * it is allowed to have d == 0.seconds,
+         * which mean we wil run events once
+        **/
         SysTime deadline = Clock.currTime + d;
-        debug tracef("evl run for %s", d);
+        debug tracef("evl run %s",runIndefinitely? "indefinitely": "for %s".format(d));
+
 
         while( running ) {
+
             while (overdue.length > 0) {
                 // execute timers with requested negative delay
                 Timer t = overdue[0];
@@ -76,10 +89,10 @@ struct NativeEventLoopImpl {
                     errorf("Uncaught exception: %s", e);
                 }
             }
-            Duration delta = deadline - Clock.currTime;
-            delta = max(delta, 0.seconds);
 
-            int timeout_ms = cast(int)delta.total!"msecs";
+            int timeout_ms = runIndefinitely ?
+                -1 :
+                _calculate_timeout(deadline);
 
             uint ready = epoll_wait(epoll_fd, &events[0], MAXEVENTS, timeout_ms);
             if ( ready == 0 ) {
@@ -87,18 +100,18 @@ struct NativeEventLoopImpl {
                 return;
             }
             if ( ready < 0 ) {
-                error("epoll returned error");
-                return;
+                errorf("epoll_wait returned error %s", fromStringz(strerror(errno)));
             }
+            enforce(ready >= 0);
             if ( ready > 0 ) {
                 foreach(i; 0..ready) {
                     auto e = events[i];
                     debug tracef("got event %s", e);
                     CanPoll p = cast(CanPoll)e.data.ptr;
                     if ( p.id.fd == timer_fd ) {
-                        // with EPOLLET flag I dont have to read from timerfd
-                        //ubyte[8] v;
-                        //read(timer_fd, &v[0], 8);
+                        // with EPOLLET flag I dont have to read from timerfd, otherwise I ahve to:
+                        // ubyte[8] v;
+                        // read(timer_fd, &v[0], 8);
 
                         auto now = Clock.currTime;
                         /*
