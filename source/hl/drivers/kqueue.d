@@ -14,7 +14,7 @@ import core.sys.posix.unistd: close;
 
 import core.sys.darwin.sys.event;
 
-import core.sys.posix.signal : timespec;
+import core.sys.posix.signal;
 import core.stdc.stdint : intptr_t, uintptr_t;
 import core.stdc.string: strerror;
 import core.stdc.errno: errno;
@@ -73,6 +73,8 @@ struct NativeEventLoopImpl {
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
 
+        Signal[][int]           signals;
+
     }
     void initialize() {
         if ( kqueue_fd == -1) {
@@ -80,7 +82,6 @@ struct NativeEventLoopImpl {
         }
         debug tracef("kqueue_fd=%d", kqueue_fd);
         timers = new RedBlackTree!Timer();
-
     }
     void deinit() {
         debug tracef("deinit");
@@ -199,7 +200,22 @@ struct NativeEventLoopImpl {
                             // kqueue do not require deletion here
                         }
 
-                        break;
+                        continue;
+                    case EVFILT_SIGNAL:
+                        assert(signals.length != 0);
+                        auto signum = cast(int)e.ident;
+                        debug tracef("received signal %d", signum);
+                        assert(signals[signum].length > 0);
+                        foreach(s; signals[signum]) {
+                            debug tracef("processing signal handler %s", s);
+                            try {
+                                SigHandlerDelegate h = s._handler;
+                                h(signum);
+                            } catch (Exception e) {
+                                errorf("Uncaught exception: %s", e);
+                            }
+                        }
+                        continue;
                     default:
                         break;
                 }
@@ -263,12 +279,14 @@ struct NativeEventLoopImpl {
         if ( in_index == MAXEVENTS ) {
             // flush
             int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
-            enforce(rc>=0, "_del_kernel_timer: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
+            enforce(rc>=0, "_add_kernel_timer: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
             in_index = 0;
         }
         in_events[in_index++] = e;
     }
+
     alias _mod_kernel_timer = _add_kernel_timer;
+
     void _del_kernel_timer() {
         debug trace("del kernel timer");
         kevent_t e;
@@ -279,6 +297,89 @@ struct NativeEventLoopImpl {
             // flush
             int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
             enforce(rc>=0, "_del_kernel_timer: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
+            in_index = 0;
+        }
+        in_events[in_index++] = e;
+    }
+
+    /*
+     * signal functions
+     */
+
+    void start_signal(Signal s) {
+        debug tracef("start signal %s", s);
+        debug tracef("signals: %s", signals);
+        auto r = s._signum in signals;
+        if ( r is null || r.length == 0 ) {
+            // enable signal only through kevent
+            _add_kernel_signal(s);
+        }
+        signals[s._signum] ~= s;
+    }
+
+    void stop_signal(Signal s) {
+        debug trace("stop signal");
+        auto r = s._signum in signals;
+        if ( r is null ) {
+            throw new NotFoundException("You tried to stop signal that was not started");
+        }
+        Signal[] new_row;
+        foreach(a; *r) {
+            if (a._id == s._id) {
+                continue;
+            }
+            new_row ~= a;
+        }
+        if ( new_row.length == 0 ) {
+            *r = null;
+            _del_kernel_signal(s);
+            // reenable old signal behaviour
+        } else {
+            *r = new_row;
+        }
+        debug tracef("new signals %d row %s", s._signum, new_row);
+    }
+
+    void _add_kernel_signal(in Signal s) {
+        debug tracef("add kernel signal %d, id: %d", s._signum, s._id);
+        //static sigset_t m;
+        //sigemptyset(&m);
+        //sigaddset(&m, s._signum);
+        //sigprocmask(SIG_BLOCK, &m, null);
+        //signal(sig, SIG_IGN);
+
+        //sigaction_t sa;
+        //sa.sa_handler = SIG_IGN;
+        //sigaction(s._signum, &sa, null);
+
+        signal(s._signum, SIG_IGN);
+
+        kevent_t e;
+        e.ident = s._signum;
+        e.filter = EVFILT_SIGNAL;
+        e.flags = EV_ADD;
+        if ( in_index == MAXEVENTS ) {
+            // flush
+            int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
+            enforce(rc>=0, "_add_kernel_signal: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
+            in_index = 0;
+        }
+        in_events[in_index++] = e;
+    }
+
+    void _del_kernel_signal(in Signal s) {
+        debug tracef("del kernel signal %d, id: %d", s._signum, s._id);
+
+        signal(s._signum, SIG_DFL);
+
+        kevent_t e;
+        e.ident = s._signum;
+        e.filter = EVFILT_SIGNAL;
+        e.flags = EV_DELETE;
+        if ( in_index == MAXEVENTS ) {
+            // flush
+            int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
+            enforce(rc>=0, "_add_kernel_signal: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
             in_index = 0;
         }
         in_events[in_index++] = e;

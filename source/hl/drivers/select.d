@@ -15,9 +15,21 @@ version(Posix) {
 }
 
 import core.stdc.string: strerror;
-import core.stdc.errno: errno;
+import core.stdc.errno;
+import core.stdc.signal;
 
 import hl.events;
+
+//
+// TODO add support for multiple select event loops
+//
+private enum                            sig_array_length = 64;
+private static int[sig_array_length]    last_signal;
+private static int                      last_signal_index;
+
+extern(C) void sig_catcher(int signum) nothrow @nogc {
+    last_signal[last_signal_index++] = signum;
+}
 
 struct FallbackEventLoopImpl {
     immutable string _name = "select";
@@ -28,6 +40,7 @@ struct FallbackEventLoopImpl {
         fd_set                  err_fds;
 
         RedBlackTree!Timer      timers;
+        Signal[][int]           signals;
 
         bool                    running = true;
     }
@@ -122,6 +135,25 @@ struct FallbackEventLoopImpl {
             debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
             auto ready = select(fdmax+1, &read_fds, &write_fds, null, wait);
             debug tracef("returned %d events", ready);
+            if ( ready < 0 && errno == EINTR ) {
+                int s_ind;
+                while(s_ind < last_signal_index) {
+                    int signum = last_signal[s_ind];
+                    assert(signals[signum].length > 0);
+                    foreach(s; signals[signum]) {
+                        debug tracef("processing signal handler %s", s);
+                        try {
+                            SigHandlerDelegate h = s._handler;
+                            h(signum);
+                        } catch (Exception e) {
+                            errorf("Uncaught exception: %s", e);
+                        }
+                    }
+                    s_ind++;
+                }
+                last_signal_index = 0;
+                continue;
+            }
             if ( ready < 0 ) {
                 errorf("on call: (%s, %s, %s, %s)", fdmax+1, read_fds, write_fds, tv);
                 errorf("select returned error %s", fromStringz(strerror(errno)));
@@ -175,9 +207,52 @@ struct FallbackEventLoopImpl {
         debug tracef("insert timer: %s", t);
         timers.insert(t);
     }
+
     void stop_timer(Timer t) {
         debug tracef("remove timer %s", t);
         auto r = timers.equalRange(t);
         timers.remove(r);
+    }
+
+    void start_signal(Signal s) {
+        debug tracef("start signal %s", s);
+        debug tracef("signals: %s", signals);
+        auto r = s._signum in signals;
+        if ( r is null || r.length == 0 ) {
+            // enable signal only through kevent
+            _add_kernel_signal(s);
+        }
+        signals[s._signum] ~= s;
+    }
+
+    void stop_signal(Signal s) {
+        debug trace("stop signal");
+        auto r = s._signum in signals;
+        if ( r is null ) {
+            throw new NotFoundException("You tried to stop signal that was not started");
+        }
+        Signal[] new_row;
+        foreach(a; *r) {
+            if (a._id == s._id) {
+                continue;
+            }
+            new_row ~= a;
+        }
+        if ( new_row.length == 0 ) {
+            *r = null;
+            _del_kernel_signal(s);
+            // reenable old signal behaviour
+        } else {
+            *r = new_row;
+        }
+        debug tracef("new signals %d row %s", s._signum, new_row);
+    }
+    void _add_kernel_signal(Signal s) {
+        signal(s._signum, &sig_catcher);
+        debug tracef("adding handler for signum %d: %x", s._signum, &this);
+    }
+    void _del_kernel_signal(Signal s) {
+        signal(s._signum, SIG_DFL);
+        debug tracef("deleted handler for signum %d: %x", s._signum, &this);
     }
 }

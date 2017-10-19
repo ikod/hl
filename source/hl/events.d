@@ -14,8 +14,7 @@ enum AppEvent : ubyte {
 };
 
 alias HandlerDelegate = void delegate(AppEvent);
-
-private static ulong timer_id = 1000;
+alias SigHandlerDelegate = void delegate(int);
 
 class CanPoll {
     union Id {
@@ -25,7 +24,14 @@ class CanPoll {
     Id  id;
 }
 
+class NotFoundException : Exception {
+    this(string msg, string file = __FILE__, size_t line = __LINE__) {
+        super(msg, file, line);
+    }
+}
+
 final class Timer: CanPoll {
+    private static ulong timer_id = 1;
     package {
         immutable ulong           _id;
         immutable SysTime         _expires;
@@ -50,12 +56,35 @@ final class Timer: CanPoll {
         enforce(h != HandlerDelegate.init, "Unitialized handler for new Timer");
         _expires = e;
         _handler = h;
-        _id = timer_id;
-        timer_id++;
+        _id = timer_id++;
     }
     override string toString() const {
         import std.format: format;
-        return "expires: %s, id: %d".format(_expires, _id);
+        return "timer: expires: %s, id: %d".format(_expires, _id);
     }
 }
 
+final class Signal : CanPoll {
+    private static ulong signal_id = 1;
+    package {
+        immutable int   _signum;
+        immutable ulong _id;
+        immutable SigHandlerDelegate _handler;
+    }
+
+    this(int signum, SigHandlerDelegate h) {
+        _signum = signum;
+        _handler = h;
+        _id = signal_id++;
+    }
+    int opCmp(in Signal other) const nothrow pure @safe {
+        if ( _signum == other._signum ) {
+            return _id < other._id ? -1 : 1;
+        }
+        return _signum < other._signum ? -1 : 1;
+    }
+    override string toString() const {
+        import std.format: format;
+        return "signal: signum: %d, id: %d".format(_signum, _id);
+    }
+}

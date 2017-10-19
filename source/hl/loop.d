@@ -65,10 +65,17 @@ struct EventLoop(I) {
     void stopTimer(Timer t) {
         _impl.stop_timer(t);
     }
+    void startSignal(Signal s) {
+        _impl.start_signal(s);
+    }
+    void stopSignal(Signal s) {
+        _impl.stop_signal(s);
+    }
 }
 
 unittest {
     import std.stdio;
+    globalLogLevel = LogLevel.info;
     auto best_loop = getEventLoop();
     auto fallback_loop = getFallBackEventLoop();
     version(OSX) {
@@ -81,7 +88,13 @@ unittest {
 }
 
 unittest {
+    /**
+    *
+    *  Timer tests
+    *
+    **/
     globalLogLevel = LogLevel.info;
+    info(" --- Testing timers ---");
     import std.stdio;
     int i1, i2;
     auto loop = getEventLoop();
@@ -276,7 +289,6 @@ unittest {
         loop.run(0.seconds);
         assert(i1==1);
 
-
         i1 = 0;
         a = new Timer(50.msecs, h1);
         fallback_loop.startTimer(a);
@@ -285,5 +297,91 @@ unittest {
         Thread.sleep(45.msecs);
         fallback_loop.run(0.seconds);
         assert(i1==1);
+    }
+}
+
+unittest {
+    /**
+     *
+     * Signal tests
+     *
+    **/
+    import std.stdio;
+    import core.sys.posix.signal;
+
+    info("--- Testing signals ---");
+    auto loop = getEventLoop();
+    auto fallback_loop = getFallBackEventLoop();
+    auto fb_loop = getFallBackEventLoop();
+    globalLogLevel = LogLevel.info;
+    int i1, i2;
+    SigHandlerDelegate h1 = delegate void(int signum) {
+        i1++;
+    };
+    SigHandlerDelegate h2 = delegate void(int signum) {
+        i2++;
+    };
+    {
+        auto sighup1 = new Signal(SIGHUP, h1);
+        auto sighup2 = new Signal(SIGHUP, h2);
+        auto sigint = new Signal(SIGINT, h2);
+        loop.startSignal(sighup1);
+        loop.startSignal(sighup2);
+        loop.startSignal(sigint);
+        loop.stopSignal(sighup1);
+        loop.stopSignal(sighup2);
+        loop.stopSignal(sigint);
+        loop.run(300.msecs);
+    }
+    version(Posix) {
+        import core.sys.posix.unistd;
+        import core.sys.posix.sys.wait;
+        import core.thread;
+        info("testing posix signals with native driver");
+        globalLogLevel = LogLevel.info;
+        i1 = i2 = 0;
+        auto sighup1 = new Signal(SIGHUP, h1);
+        auto sighup2 = new Signal(SIGHUP, h2);
+        auto sigint1 = new Signal(SIGINT, h2);
+        foreach(s; [sighup1, sighup2, sigint1]) {
+            loop.startSignal(s);
+        }
+        auto parent_pid = getpid();
+        auto child_pid = fork();
+        if ( child_pid == 0 ) {
+            Thread.sleep(500.msecs);
+            kill(parent_pid, SIGHUP);
+            kill(parent_pid, SIGINT);
+            _exit(0);
+        } else {
+            loop.run(1.seconds);
+            waitpid(child_pid, null, 0);
+        }
+        assert(i1 == 1);
+        assert(i2 == 2);
+        foreach(s; [sighup1, sighup2, sigint1]) {
+            loop.stopSignal(s);
+        }
+        info("testing posix signals with fallback driver");
+        globalLogLevel = LogLevel.info;
+        i1 = i2 = 0;
+        foreach(s; [sighup1, sighup2, sigint1]) {
+            fallback_loop.startSignal(s);
+        }
+        child_pid = fork();
+        if ( child_pid == 0 ) {
+            Thread.sleep(500.msecs);
+            kill(parent_pid, SIGHUP);
+            kill(parent_pid, SIGINT);
+            _exit(0);
+        } else {
+            fallback_loop.run(1.seconds);
+            waitpid(child_pid, null, 0);
+        }
+        assert(i1 == 1);
+        assert(i2 == 2);
+        foreach(s; [sighup1, sighup2, sigint1]) {
+            fallback_loop.stopSignal(s);
+        }
     }
 }

@@ -9,10 +9,12 @@ import std.exception;
 import std.experimental.logger;
 import std.algorithm.comparison: max;
 import core.stdc.string: strerror;
-import core.stdc.errno: errno;
+import core.stdc.errno: errno, EAGAIN;
 
 import core.sys.linux.epoll;
 import core.sys.linux.timerfd;
+import core.sys.linux.sys.signalfd;
+
 import core.sys.posix.unistd: close, read;
 import core.sys.posix.time : itimerspec, CLOCK_MONOTONIC , timespec;
 
@@ -26,10 +28,14 @@ struct NativeEventLoopImpl {
         enum                    MAXEVENTS = 1024;
         int                     epoll_fd = -1;
         int                     timer_fd = -1;
+        int                     signal_fd = -1;
+        sigset_t                mask;
+
         align(1)                epoll_event[MAXEVENTS] events;
 
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
+        Signal[][int]           signals;
     }
     @disable this(this) {};
     void initialize() {
@@ -108,6 +114,7 @@ struct NativeEventLoopImpl {
                     auto e = events[i];
                     debug tracef("got event %s", e);
                     CanPoll p = cast(CanPoll)e.data.ptr;
+
                     if ( p.id.fd == timer_fd ) {
                         // with EPOLLET flag I dont have to read from timerfd, otherwise I ahve to:
                         // ubyte[8] v;
@@ -145,6 +152,34 @@ struct NativeEventLoopImpl {
                             _del_kernel_timer();
                         }
                         continue;
+                    }
+                    if ( p.id.fd == signal_fd ) {
+                        enum siginfo_items = 8;
+                        signalfd_siginfo[siginfo_items] info;
+                        debug trace("got signal");
+                        assert(signal_fd != -1);
+                        while (true) {
+                            auto rc = read(signal_fd, &info, info.sizeof);
+                            if ( rc < 0 && errno == EAGAIN ) {
+                                break;
+                            }
+                            enforce(rc > 0);
+                            auto got_signals = rc / signalfd_siginfo.sizeof;
+                            debug tracef("read info %d, %s", got_signals, info[0..got_signals]);
+                            foreach(si; 0..got_signals) {
+                                auto signum = info[si].ssi_signo;
+                                debug tracef("signum: %d", signum);
+                                foreach(s; signals[signum]) {
+                                    debug tracef("processing signal handler %s", s);
+                                    try {
+                                        SigHandlerDelegate h = s._handler;
+                                        h(signum);
+                                    } catch (Exception e) {
+                                        errorf("Uncaught exception: %s", e);
+                                    }
+                                }
+                            }
+                        }
                     }
                     //HandlerDelegate h = cast(HandlerDelegate)e.data.ptr;
                     //AppEvent appEvent = AppEvent(sysEventToAppEvent(e.events), -1);
@@ -232,5 +267,72 @@ struct NativeEventLoopImpl {
         e.data.fd = timer_fd;
         int rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl del(%s): %s".format(e, fromStringz(strerror(errno))));
+    }
+
+    //
+    // signals
+    //
+    void start_signal(Signal s) {
+        debug tracef("start signal %s", s);
+        debug tracef("signals: %s", signals);
+        auto r = s._signum in signals;
+        if ( r is null || r.length == 0 ) {
+            // enable signal only through kevent
+            _add_kernel_signal(s);
+        }
+        s.id.fd = signal_fd;
+        signals[s._signum] ~= s;
+    }
+    void stop_signal(Signal s) {
+        debug trace("stop signal");
+        auto r = s._signum in signals;
+        if ( r is null ) {
+            throw new NotFoundException("You tried to stop signal that was not started");
+        }
+        Signal[] new_row;
+        foreach(a; *r) {
+            if (a._id == s._id) {
+                continue;
+            }
+            new_row ~= a;
+        }
+        if ( new_row.length == 0 ) {
+            *r = null;
+            _del_kernel_signal(s);
+            // reenable old signal behaviour
+        } else {
+            *r = new_row;
+        }
+        debug tracef("new signals %d row %s", s._signum, new_row);
+    }
+    void _add_kernel_signal(Signal s) {
+        debug tracef("add kernel signal %d, id: %d", s._signum, s._id);
+        sigset_t m;
+        sigemptyset(&m);
+        sigaddset(&m, s._signum);
+        sigprocmask(SIG_BLOCK, &m, null);
+
+        sigaddset(&mask, s._signum);
+        if ( signal_fd == -1 ) {
+            signal_fd = signalfd(-1, &mask, SFD_NONBLOCK|SFD_CLOEXEC);
+            epoll_event e;
+            e.events = EPOLLIN|EPOLLET;
+            e.data.ptr = cast(void*)s;
+            auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &e);
+            enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
+        } else {
+            signalfd(signal_fd, &mask, 0);
+        }
+
+    }
+    void _del_kernel_signal(Signal s) {
+        debug tracef("del kernel signal %d, id: %d", s._signum, s._id);
+        sigset_t m;
+        sigemptyset(&m);
+        sigaddset(&m, s._signum);
+        sigprocmask(SIG_UNBLOCK, &m, null);
+        sigdelset(&mask, s._signum);
+        assert(signal_fd != -1);
+        signalfd(signal_fd, &mask, 0);
     }
 }
