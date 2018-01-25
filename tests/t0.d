@@ -13,7 +13,7 @@ void main() {
     import std.experimental.logger;
     import hl;
 
-    globalLogLevel(LogLevel.trace);
+    globalLogLevel(LogLevel.info);
     auto loop = getEventLoop();
     HandlerDelegate handler = (AppEvent e) {
         //writeln("Hello from Handler");
@@ -21,7 +21,7 @@ void main() {
     };
     auto timer = new Timer(1.seconds, handler);
     loop.startTimer(timer);
-    writeln("Starting loop1, wait 1seconds ...");
+    writeln("Starting loop1, wait 1.2 seconds ...");
     loop.run(1200.msecs);
     writeln("loop1 stopped");
 

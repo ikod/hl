@@ -5,5 +5,8 @@
     ],
     "description": "A minimal D application.",
     "license": "proprietary",
-    "targetType": "library"
+    "targetType": "library",
+    "dependencies": {
+        "nbuff": "~>0.0.1"
+    }
 }

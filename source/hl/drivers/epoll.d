@@ -37,7 +37,8 @@ struct NativeEventLoopImpl {
         Timer[]                 overdue;    // timers added with expiration in past
         Signal[][int]           signals;
     }
-    @disable this(this) {};
+    @disable this(this) {}
+
     void initialize() {
         if ( epoll_fd == -1 ) {
             epoll_fd = epoll_create(MAXEVENTS);
@@ -334,5 +335,14 @@ struct NativeEventLoopImpl {
         sigdelset(&mask, s._signum);
         assert(signal_fd != -1);
         signalfd(signal_fd, &mask, 0);
+    }
+
+    void start_poll(FileDescriptor d, AppEvent ev) pure nothrow @safe {
+        //immutable fd = d._fileno;
+        //d._polling |= ev;
+        //files[fd] = d;
+    }
+    void stop_poll(FileDescriptor d, AppEvent ev) {
+    
     }
 }

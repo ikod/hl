@@ -59,22 +59,23 @@ import hl.events;
 struct NativeEventLoopImpl {
     immutable bool   native = true;
     immutable string _name = "kqueue";
-    @disable this(this) {};
+    @disable this(this) {}
     private {
         bool running = true;
-        enum MAXEVENTS = 16;
+        enum MAXEVENTS = 512;
 
         int  kqueue_fd = -1;  // interface to kernel
         int  in_index;
+        int  ready;
 
-        kevent_t[MAXEVENTS] in_events;
-        kevent_t[MAXEVENTS] out_events;
+        kevent_t[MAXEVENTS]      in_events;
+        kevent_t[MAXEVENTS]      out_events;
 
-        RedBlackTree!Timer      timers;
-        Timer[]                 overdue;    // timers added with expiration in past
+        RedBlackTree!Timer       timers;
+        Timer[]                  overdue;    // timers added with expiration in past
 
-        Signal[][int]           signals;
-
+        Signal[][int]            signals;
+        FileHandlerFunction[int] fileHandlers;
     }
     void initialize() {
         if ( kqueue_fd == -1) {
@@ -133,23 +134,20 @@ struct NativeEventLoopImpl {
                 }
             }
 
-            if ( in_index > 0 ) {
-                debug tracef("Flush %d events %s", in_index, in_events);
-                auto rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
-                enforce(rc>=0, "flush kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
-                in_index = 0;
-            }
-
             wait = runIndefinitely ?
                       null
                     : _calculate_timespec(deadline, &ts);
 
             debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
-            int ready = kevent(kqueue_fd,
+            ready = kevent(kqueue_fd,
                                 cast(kevent_t*)&in_events[0], in_index,
                                 cast(kevent_t*)&out_events[0], MAXEVENTS,
                                 wait);
+            in_index = 0;
             debug tracef("kevent returned %d events", ready);
+            debug tracef("");
+
+
             if ( ready < 0 ) {
                 errorf("kevent returned error %s", fromStringz(strerror(errno)));
             }
@@ -165,7 +163,20 @@ struct NativeEventLoopImpl {
                 }
                 auto e = out_events[i];
                 debug tracef("got kevent[%d] %s, data: %d, udata: %0x", i, e, e.data, e.udata);
+
                 switch (e.filter) {
+                    case EVFILT_READ:
+                        debug tracef("Read on fd %d", e.ident);
+                        int fd = cast(int)e.ident;
+                        auto callback = fileHandlers[fd];
+                        callback(fd, AppEvent.IN);
+                        continue;
+                    case EVFILT_WRITE:
+                        debug tracef("Write on fd %d", e.ident);
+                        int fd = cast(int)e.ident;
+                        auto callback = fileHandlers[fd];
+                        callback(fd, AppEvent.OUT);
+                        continue;
                     case EVFILT_TIMER:
                         /*
                          * Invariants for timers
@@ -173,8 +184,14 @@ struct NativeEventLoopImpl {
                          * timer list must not be empty at event.
                          * we have to receive event only on the earliest timer in list
                         */
-                        assert(!timers.empty, "timers empty on timer event");
-                        assert(cast(Timer)e.udata == timers.front);
+                        assert(!timers.empty, "timers empty on timer event: %s".format(out_events[0..ready]));
+                        assert(timers.front !is null, "front timer is null at %s".format(out_events[0..ready]));
+                        if ( cast(Timer)e.udata != timers.front) {
+                            errorf("timer event: %s != timers.front: %s", cast(Timer)e.udata, timers.front);
+                            errorf("timers=%s", timers);
+                            errorf("events=%s", out_events[0..ready]);
+                            assert(0);
+                        }
                         /* */
 
                         auto now = Clock.currTime;
@@ -183,11 +200,16 @@ struct NativeEventLoopImpl {
                             debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
                             Timer t = timers.front;
                             HandlerDelegate h = t._handler;
-                            timers.removeFront;
                             try {
                                 h(AppEvent.TMO);
                             } catch (Exception e) {
                                 errorf("Uncaught exception: %s", e);
+                            }
+                            // timer event handler can try to stop exactly this timer,
+                            // so when we returned from handler we can have different front
+                            // and we do not have to remove it.
+                            if ( !timers.empty && timers.front == t ) {
+                                timers.removeFront;
                             }
                             now = Clock.currTime;
                         } while (!timers.empty && timers.front._expires <= now );
@@ -223,7 +245,7 @@ struct NativeEventLoopImpl {
         }
     }
 
-    void start_timer(Timer t) {
+    void start_timer(Timer t) @trusted {
         debug tracef("insert timer %s - %X", t, cast(void*)t);
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
@@ -241,34 +263,99 @@ struct NativeEventLoopImpl {
         timers.insert(t);
     }
 
-    void stop_timer(Timer t) {
-        //debug tracef("remove timer %s", t);
-        //_del_kernel_timer(t);
-        debug tracef("remove timer %s", t);
+    bool cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
+        foreach(ref o; out_events[0..ready]) {
+            if ( o.ident == e.ident && o.filter == e.filter && o.udata == e.udata ) {
+                o.ident = 0;
+                o.filter = 0;
+                o.udata = null;
+                return true;
+            }
+        }
+        return false;
+    }
 
+    void stop_timer(Timer t) {
+
+        debug tracef("timers: %s", timers);
         if ( t != timers.front ) {
+            debug tracef("remove non-front %s", t);
             auto r = timers.equalRange(t);
             timers.remove(r);
             return;
         }
 
+        kevent_t e;
+        e.ident = 0;
+        e.filter = EVFILT_TIMER;
+        e.udata = cast(void*)t;
+        auto cleared = cleared_from_out_events(e);
+
         timers.removeFront();
-        debug trace("we have to del this timer from kernel or set to next");
-        if ( !timers.empty ) {
-            // we can change kernel timer to next,
-            // If next timer expired - set delta = 0 to run on next loop invocation
-            auto next = timers.front;
-            auto d = next._expires - Clock.currTime;
-            d = max(d, 0.seconds);
-            _mod_kernel_timer(timers.front, d);
+        if ( timers.empty ) {
+            if ( cleared ) {
+                debug tracef("return because it is cleared");
+                return;
+            }
+            debug tracef("we have to del this timer from kernel");
+            _del_kernel_timer();
             return;
         }
-        _del_kernel_timer();
+        debug tracef("we have to set timer to next: %s, %s", out_events[0..ready], timers);
+        // we can change kernel timer to next,
+        // If next timer expired - set delta = 0 to run on next loop invocation
+        auto next = timers.front;
+        auto d = next._expires - Clock.currTime;
+        d = max(d, 0.seconds);
+        _mod_kernel_timer(timers.front, d);
+        return;
     }
 
+    void flush() {
+        if ( in_index == 0 ) {
+            return;
+        }
+        // flush
+        int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
+        enforce(rc>=0, "flush: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
+        in_index = 0;
+    }
+    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @trusted {
+        assert(fd>=0);
+        immutable filter = appEventToSysEvent(ev);
+        debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
+        kevent_t e;
+        e.ident = fd;
+        e.filter = filter;
+        e.flags = EV_ADD;
+        if ( in_index == MAXEVENTS ) {
+            flush();
+        }
+        in_events[in_index++] = e;
+        fileHandlers[fd] = f;
+    }
+    void stop_poll(int fd, AppEvent ev) @trusted {
+        assert(fd>=0);
+        immutable filter = appEventToSysEvent(ev);
+        kevent_t e;
+        e.ident = fd;
+        e.filter = filter;
+        e.flags = EV_DELETE;
+
+        auto cleared = cleared_from_out_events(e);
+
+        if ( cleared ) {
+            return;
+        }
+
+        if ( in_index == MAXEVENTS ) {
+            flush();
+        }
+        in_events[in_index++] = e;
+    }
     void _add_kernel_timer(in Timer t, in Duration d) {
         debug tracef("add kernel timer %s, delta %s", t, d);
-        assert(d > 0.seconds);
+        assert(d >= 0.seconds);
         intptr_t delay_ms = d.split!"msecs".msecs;
         kevent_t e;
         e.ident = 0;
@@ -277,10 +364,7 @@ struct NativeEventLoopImpl {
         e.data = delay_ms;
         e.udata = cast(void*)t;
         if ( in_index == MAXEVENTS ) {
-            // flush
-            int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
-            enforce(rc>=0, "_add_kernel_timer: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
-            in_index = 0;
+            flush();
         }
         in_events[in_index++] = e;
     }
@@ -294,10 +378,7 @@ struct NativeEventLoopImpl {
         e.filter = EVFILT_TIMER;
         e.flags = EV_DELETE;
         if ( in_index == MAXEVENTS ) {
-            // flush
-            int rc = kevent(kqueue_fd, &in_events[0], in_index, null, 0, null);
-            enforce(rc>=0, "_del_kernel_timer: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
-            in_index = 0;
+            flush();
         }
         in_events[in_index++] = e;
     }
@@ -342,16 +423,6 @@ struct NativeEventLoopImpl {
 
     void _add_kernel_signal(in Signal s) {
         debug tracef("add kernel signal %d, id: %d", s._signum, s._id);
-        //static sigset_t m;
-        //sigemptyset(&m);
-        //sigaddset(&m, s._signum);
-        //sigprocmask(SIG_BLOCK, &m, null);
-        //signal(sig, SIG_IGN);
-
-        //sigaction_t sa;
-        //sa.sa_handler = SIG_IGN;
-        //sigaction(s._signum, &sa, null);
-
         signal(s._signum, SIG_IGN);
 
         kevent_t e;

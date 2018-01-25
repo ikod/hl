@@ -71,6 +71,15 @@ struct EventLoop(I) {
     void stopSignal(Signal s) {
         _impl.stop_signal(s);
     }
+    void startPoll(int fd, AppEvent ev, FileHandlerFunction f) {
+        _impl.start_poll(fd, ev, f);
+    }
+    void stopPoll(int fd, AppEvent ev) {
+        _impl.stop_poll(fd, ev);
+    }
+    void flush() {
+        _impl.flush();
+    }
 }
 
 unittest {
@@ -207,6 +216,26 @@ unittest {
         globalLogLevel = logLevel;
     }
     {
+        /** test stop timer inside from handler **/
+        info("stop timer inside from timer handler");
+        Timer a;
+        HandlerDelegate h = delegate void(AppEvent e) {
+            loop.stopTimer(a);
+            a = null;
+        };
+        a = new Timer(50.msecs, h);
+        loop.startTimer(a);
+        auto logLevel = globalLogLevel;
+        globalLogLevel = LogLevel.fatal;
+        loop.run(100.msecs);
+        globalLogLevel = logLevel;
+        a = new Timer(50.msecs, h);
+        fallback_loop.startTimer(a);
+        globalLogLevel = LogLevel.fatal;
+        fallback_loop.run(100.msecs);
+        globalLogLevel = logLevel;
+    }
+    {
         /** overdue timers handling **/
         info("test overdue timers handling");
         import core.thread;
@@ -312,7 +341,6 @@ unittest {
     info("--- Testing signals ---");
     auto loop = getEventLoop();
     auto fallback_loop = getFallBackEventLoop();
-    auto fb_loop = getFallBackEventLoop();
     globalLogLevel = LogLevel.info;
     int i1, i2;
     SigHandlerDelegate h1 = delegate void(int signum) {
@@ -362,6 +390,8 @@ unittest {
         foreach(s; [sighup1, sighup2, sigint1]) {
             loop.stopSignal(s);
         }
+        loop.run(1.msecs); // send stopSignals to kernel
+
         info("testing posix signals with fallback driver");
         globalLogLevel = LogLevel.info;
         i1 = i2 = 0;
@@ -383,5 +413,36 @@ unittest {
         foreach(s; [sighup1, sighup2, sigint1]) {
             fallback_loop.stopSignal(s);
         }
+        fallback_loop.run(1.msecs); // send stopSignals to kernel
     }
+}
+
+unittest {
+    globalLogLevel = LogLevel.info;
+    info(" --- Testing sockets ---");
+    import hl.socket: Socket;
+    auto loop = getEventLoop();
+    auto server = new Socket();
+    auto fd = server.open();
+    //server.close();
+    assert(fd >= 0);
+    assertThrown!Exception(server.bind("a:b:c"));
+    void function(Socket) f = (Socket s) {
+        tracef("accepted", s);
+        s.close();
+    };
+    server.bind("127.0.0.1:16000");
+    server.listen();
+    server.accept(loop, f);
+    loop.run(50.seconds);
+
+    //globalLogLevel = LogLevel.trace;
+    //auto fallback_loop = getFallBackEventLoop();
+    //server = Socket();
+    //server.open();
+    //server.bind("127.0.0.1:16000");
+    //server.listen();
+    //server.accept(fallback_loop, f);
+    //fallback_loop.startPoll(server.descriptor(), AppEvent.IN);
+    //fallback_loop.run(100.seconds);
 }

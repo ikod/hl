@@ -6,6 +6,7 @@ import std.experimental.logger;
 import std.string;
 import std.algorithm.comparison: min, max;
 import std.exception: enforce;
+import core.thread;
 
 version(Windows) {
     import core.sys.windows.winsock2;
@@ -41,6 +42,8 @@ struct FallbackEventLoopImpl {
 
         RedBlackTree!Timer      timers;
         Signal[][int]           signals;
+
+        FileDescriptor[int]     files;
 
         bool                    running = true;
     }
@@ -100,9 +103,10 @@ struct FallbackEventLoopImpl {
 
         debug tracef("evl run %s",runIndefinitely? "indefinitely": "for %s".format(d));
 
-        int fdmax = -1;
 
         while (running) {
+
+            int fdmax = -1;
 
             while ( !timers.empty && timers.front._expires <= now) {
                 debug tracef("processing overdue  %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
@@ -121,6 +125,17 @@ struct FallbackEventLoopImpl {
             FD_ZERO(&write_fds);
             FD_ZERO(&err_fds);
 
+            foreach(fd, descriptor; files) {
+                debug trace(descriptor.toString());
+                if ( descriptor._polling & AppEvent.IN ) {
+                    FD_SET(fd, &read_fds);
+                }
+                if ( descriptor._polling & AppEvent.OUT ) {
+                    FD_SET(fd, &write_fds);
+                }
+                fdmax = max(fdmax, fd);
+            }
+
             wait = (runIndefinitely && timers.empty)  ?
                           null
                         : _calculate_timeval(deadline, &tv);
@@ -132,9 +147,9 @@ struct FallbackEventLoopImpl {
             } else
                 wait = _calculate_timeval(deadline, &tv);
 
-            debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
-            auto ready = select(fdmax+1, &read_fds, &write_fds, null, wait);
-            debug tracef("returned %d events", ready);
+            //debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
+            auto ready = select(fdmax+1, &read_fds, &write_fds, &err_fds, wait);
+            //debug tracef("returned %d events", ready);
             if ( ready < 0 && errno == EINTR ) {
                 int s_ind;
                 while(s_ind < last_signal_index) {
@@ -200,10 +215,22 @@ struct FallbackEventLoopImpl {
                     now = Clock.currTime;
                 } while (!timers.empty && timers.front._expires <= now );
             }
+            if ( ready > 0 ) {
+                foreach(fd, descriptor; files) {
+                    if ( (descriptor._polling & AppEvent.IN) && FD_ISSET(fd, &read_fds) ) {
+                        //debug tracef("got IN event on file %d, descriptor: %s", fd, descriptor);
+                        descriptor._handler(AppEvent.IN);
+                    }
+                    if ( (descriptor._polling & AppEvent.OUT) && FD_ISSET(fd, &write_fds) ) {
+                        //debug tracef("got OUT event on file %d", fd);
+                        descriptor._handler(AppEvent.OUT);
+                    }
+                }
+            }
         }
     }
 
-    void start_timer(Timer t) {
+    void start_timer(Timer t) @trusted {
         debug tracef("insert timer: %s", t);
         timers.insert(t);
     }
@@ -213,7 +240,16 @@ struct FallbackEventLoopImpl {
         auto r = timers.equalRange(t);
         timers.remove(r);
     }
-
+    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) pure nothrow @safe {
+        //immutable fd = d._fileno;
+        //d._polling |= ev;
+        //files[fd] = d;
+    }
+    void stop_poll(int fd, AppEvent ev) {
+    
+    }
+    void flush() {
+    }
     void start_signal(Signal s) {
         debug tracef("start signal %s", s);
         debug tracef("signals: %s", signals);
