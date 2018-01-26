@@ -189,7 +189,7 @@ class Socket {
                         // application should check for both possibilities.
                         break;
                     }
-                    throw new Exception(to!string(strerror(errno())));
+                    throw new Exception(to!string(strerror(err)));
                 }
                 debug tracef("New socket fd: %d", new_s);
                 int flag = 1;

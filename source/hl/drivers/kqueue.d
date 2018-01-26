@@ -185,7 +185,6 @@ struct NativeEventLoopImpl {
                          * we have to receive event only on the earliest timer in list
                         */
                         assert(!timers.empty, "timers empty on timer event: %s".format(out_events[0..ready]));
-                        assert(timers.front !is null, "front timer is null at %s".format(out_events[0..ready]));
                         if ( cast(Timer)e.udata != timers.front) {
                             errorf("timer event: %s != timers.front: %s", cast(Timer)e.udata, timers.front);
                             errorf("timers=%s", timers);
@@ -276,6 +275,8 @@ struct NativeEventLoopImpl {
     }
 
     void stop_timer(Timer t) {
+
+        assert(!timers.empty, "You are trying to remove timer %s, but timer list is empty".format(t));
 
         debug tracef("timers: %s", timers);
         if ( t != timers.front ) {

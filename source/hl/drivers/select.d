@@ -41,6 +41,8 @@ struct FallbackEventLoopImpl {
         fd_set                  err_fds;
 
         RedBlackTree!Timer      timers;
+        Timer[]                 overdue;    // timers added with expiration in past
+
         Signal[][int]           signals;
 
         FileDescriptor[int]     files;
@@ -107,6 +109,20 @@ struct FallbackEventLoopImpl {
         while (running) {
 
             int fdmax = -1;
+
+            while (overdue.length > 0) {
+                // execute timers which user requested with negative delay
+                Timer t = overdue[0];
+                overdue = overdue[1..$];
+                debug tracef("execute overdue %s", t);
+                HandlerDelegate h = t._handler;
+                try {
+                    h(AppEvent.TMO);
+                } catch (Exception e) {
+                    errorf("Uncaught exception: %s", e);
+                }
+            }
+
 
             while ( !timers.empty && timers.front._expires <= now) {
                 debug tracef("processing overdue  %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
@@ -206,11 +222,16 @@ struct FallbackEventLoopImpl {
                     debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
                     Timer t = timers.front;
                     HandlerDelegate h = t._handler;
-                    timers.removeFront;
                     try {
                         h(AppEvent.TMO);
                     } catch (Exception e) {
                         errorf("Uncaught exception: %s", e);
+                    }
+                    // timer event handler can try to stop exactly this timer,
+                    // so when we returned from handler we can have different front
+                    // and we do not have to remove it.
+                    if ( !timers.empty && timers.front == t ) {
+                        timers.removeFront;
                     }
                     now = Clock.currTime;
                 } while (!timers.empty && timers.front._expires <= now );
@@ -232,10 +253,17 @@ struct FallbackEventLoopImpl {
 
     void start_timer(Timer t) @trusted {
         debug tracef("insert timer: %s", t);
+        auto d = t._expires - Clock.currTime;
+        d = max(d, 0.seconds);
+        if ( d == 0.seconds ) {
+            overdue ~= t;
+            return;
+        }
         timers.insert(t);
     }
 
     void stop_timer(Timer t) {
+        assert(!timers.empty, "You are trying to remove timer %s, but timer list is empty".format(t));
         debug tracef("remove timer %s", t);
         auto r = timers.equalRange(t);
         timers.remove(r);

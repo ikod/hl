@@ -219,19 +219,25 @@ unittest {
         /** test stop timer inside from handler **/
         info("stop timer inside from timer handler");
         Timer a;
+        bool  fb;
         HandlerDelegate h = delegate void(AppEvent e) {
-            loop.stopTimer(a);
+            trace("timer a handler called");
+            if ( fb ) {
+                fallback_loop.stopTimer(a);
+            } else {
+                loop.stopTimer(a);
+            }
+            trace("timer a stopped");
             a = null;
         };
+        auto logLevel = globalLogLevel;
+        globalLogLevel = LogLevel.info;
         a = new Timer(50.msecs, h);
         loop.startTimer(a);
-        auto logLevel = globalLogLevel;
-        globalLogLevel = LogLevel.fatal;
         loop.run(100.msecs);
-        globalLogLevel = logLevel;
         a = new Timer(50.msecs, h);
+        fb = true;
         fallback_loop.startTimer(a);
-        globalLogLevel = LogLevel.fatal;
         fallback_loop.run(100.msecs);
         globalLogLevel = logLevel;
     }
@@ -296,6 +302,7 @@ unittest {
         loop.run(60.msecs);
         assert(seq == [2]);
 
+        globalLogLevel = LogLevel.info;
         set_next = delegate void(AppEvent e) {
             b = new Timer(-10.seconds, fast);
             fallback_loop.startTimer(b);
