@@ -167,15 +167,23 @@ struct NativeEventLoopImpl {
                 switch (e.filter) {
                     case EVFILT_READ:
                         debug tracef("Read on fd %d", e.ident);
+                        AppEvent ae = AppEvent.IN;
+                        if ( e.flags & EV_ERROR) {
+                            ae |= AppEvent.ERR;
+                        }
                         int fd = cast(int)e.ident;
                         auto callback = fileHandlers[fd];
-                        callback(fd, AppEvent.IN);
+                        callback(fd, ae);
                         continue;
                     case EVFILT_WRITE:
                         debug tracef("Write on fd %d", e.ident);
+                        AppEvent ae = AppEvent.OUT;
+                        if ( e.flags & EV_ERROR) {
+                            ae |= AppEvent.ERR;
+                        }
                         int fd = cast(int)e.ident;
                         auto callback = fileHandlers[fd];
-                        callback(fd, AppEvent.OUT);
+                        callback(fd, ae);
                         continue;
                     case EVFILT_TIMER:
                         /*
@@ -312,7 +320,7 @@ struct NativeEventLoopImpl {
         return;
     }
 
-    void flush() {
+    void flush() @trusted {
         if ( in_index == 0 ) {
             return;
         }
@@ -321,7 +329,7 @@ struct NativeEventLoopImpl {
         enforce(rc>=0, "flush: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
         in_index = 0;
     }
-    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @trusted {
+    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @safe {
         assert(fd>=0);
         immutable filter = appEventToSysEvent(ev);
         debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
@@ -335,7 +343,7 @@ struct NativeEventLoopImpl {
         in_events[in_index++] = e;
         fileHandlers[fd] = f;
     }
-    void stop_poll(int fd, AppEvent ev) @trusted {
+    void stop_poll(int fd, AppEvent ev) @safe {
         assert(fd>=0);
         immutable filter = appEventToSysEvent(ev);
         kevent_t e;
