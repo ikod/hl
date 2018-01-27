@@ -50,12 +50,12 @@ void main(string[] args){
             IORequest out_iorq;
             out_iorq.output = output;
             out_iorq.callback = done;
-            s.io(loop, out_iorq, 1000.msecs);
+            s.io(loop, out_iorq, dur!"msecs"(opt));
         };
         IORequest in_iorq;
         in_iorq.to_read = 512;
         in_iorq.callback = on_read;
-        s.io(loop, in_iorq, 1000.msecs);
+        s.io(loop, in_iorq, dur!"msecs"(opt));
     }
     void delegate(Socket) accept = (Socket s) {
         exchange(s);
