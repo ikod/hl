@@ -117,6 +117,7 @@ class Socket {
     public void close() @safe {
         debug tracef("closing %d", _fileno);
         if ( _fileno != -1 ) {
+            fd2so[_fileno] = null;
             .close(_fileno);
             _fileno = -1;
         }
@@ -234,7 +235,6 @@ class Socket {
                 debug tracef("io timedout");
                 _polling ^= ev;
                 loop.stopPoll(_fileno, ev);
-                loop.flush();
                 result.input = assumeUnique(input);
                 result.output = output;
                 result.timedout = true;
@@ -255,7 +255,6 @@ class Socket {
                     result.error = true;
                     _polling ^= pollingFor;
                     loop.stopPoll(_fileno, pollingFor);
-                    loop.flush();
                     if ( t ) {
                         loop.stopTimer(t);
                         t = null;
@@ -274,7 +273,6 @@ class Socket {
                     if ( to_read == 0 || iorq.allowPartialInput ) {
                         _polling ^= pollingFor;
                         loop.stopPoll(_fileno, pollingFor);
-                        loop.flush();
                         if ( t ) {
                             loop.stopTimer(t);
                             t = null;
@@ -290,7 +288,6 @@ class Socket {
                     // socket closed
                     _polling ^= pollingFor;
                     loop.stopPoll(_fileno, pollingFor);
-                    loop.flush();
                     if ( t ) {
                         loop.stopTimer(t);
                         t = null;
@@ -312,7 +309,6 @@ class Socket {
                 if ( output.length == 0 ) {
                     _polling ^= pollingFor;
                     loop.stopPoll(_fileno, pollingFor);
-                    loop.flush();
                     if ( t ) {
                         loop.stopTimer(t);
                         t = null;
