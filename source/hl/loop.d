@@ -51,6 +51,11 @@ void runEventLoop(Duration d = Duration.max) {
     eventLoop.run(d);
 }
 
+//class hlEvLoop {
+//    NativeEventLoopImpl     _nimpl;
+//    FallbackEventLoopImpl   _fimpl;
+//}
+//
 struct EventLoop(I) {
     I _impl;
     void run(Duration d = Duration.max) {
@@ -424,25 +429,29 @@ unittest {
     }
 }
 
+//unittest {
+//    auto l = new hlEvLoop();
+//}
+
 unittest {
     globalLogLevel = LogLevel.info;
     info(" --- Testing sockets ---");
-    import hl.socket: Socket;
+    import hl.socket: hlSocket;
     auto loop = getEventLoop();
-    auto server = new Socket();
+    auto server = new hlSocket();
     auto fd = server.open();
     //server.close();
     assert(fd >= 0);
     assertThrown!Exception(server.bind("a:b:c"));
-    void function(Socket) f = (Socket s) {
+    void function(hlSocket) f = (hlSocket s) {
         tracef("accepted", s);
         s.close();
     };
     server.bind("127.0.0.1:16000");
     server.listen();
     server.accept(loop, f);
-    loop.run(50.seconds);
-
+    loop.run(10.seconds);
+    server.close();
     //globalLogLevel = LogLevel.trace;
     //auto fallback_loop = getFallBackEventLoop();
     //server = Socket();

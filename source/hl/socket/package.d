@@ -35,18 +35,18 @@ import nbuff;
 
 //alias Socket = RefCounted!SocketImpl;
 
-alias AcceptFunction = void function(Socket);
-alias AcceptDelegate = void delegate(Socket);
+alias AcceptFunction = void function(hlSocket);
+alias AcceptDelegate = void delegate(hlSocket);
 
 static ~this() {
     trace("deinit");
 }
 
-Socket[int] fd2so;
+hlSocket[int] fd2so;
 
 void loopCallback(int fd, AppEvent ev) {
     debug tracef("loopCallback for %d", fd);
-    Socket s = fd2so[fd];
+    hlSocket s = fd2so[fd];
     if ( s && s._fileno >= 0) {
         s._handler(ev);
     } else {
@@ -60,7 +60,7 @@ class SocketException : Exception {
     }
 }
 
-class Socket {
+class hlSocket {
     private {
         immutable ubyte _af = AF_INET;
         immutable int   _sock_type = SOCK_STREAM;
@@ -70,7 +70,8 @@ class Socket {
         size_t          _buffer_size = 16*1024;
     }
 
-    this(ubyte af = AF_INET, int sock_type = SOCK_STREAM) {
+    this(ubyte af = AF_INET, int sock_type = SOCK_STREAM) @safe {
+        debug tracef("create socket");
         _af = af;
         _sock_type = sock_type;
     }
@@ -169,6 +170,39 @@ class Socket {
         loop.stopPoll(_fileno, _polling);
     }
 
+    public void connect(L, F)(string addr, L loop, scope F f, Duration timeout) {
+         switch (_af) {
+             case AF_INET:
+                 {
+                     import core.sys.posix.netinet.in_;
+                     // addr must be "host:port"
+                     auto internet_addr = str2inetaddr(addr);
+                     sockaddr_in sin;
+                     sin.sin_family = _af;
+                     sin.sin_port = internet_addr[1];
+                     sin.sin_addr = in_addr(internet_addr[0]);
+                     uint sa_len = sin.sizeof;
+                     auto rc = .connect(_fileno, cast(sockaddr*)&sin, sa_len);
+                     debug tracef("connect(%s) = %d", addr, rc);
+                     if ( rc == -1 && errno() != EINPROGRESS ) {
+                        debug tracef("connect errno: %s", to!string(strerror(errno())));
+                        f(AppEvent.ERR);
+                        return;
+                     }
+                     _handler = (AppEvent ev) {
+                        debug tracef("connection event: %s", appeventToString(ev));
+                        loop.stopPoll(_fileno, AppEvent.OUT);
+                        f(ev);
+                     };
+                    _polling |= AppEvent.OUT;
+                    loop.startPoll(_fileno, AppEvent.OUT, &loopCallback);
+                 }
+                 break;
+             default:
+                 throw new Exception("unsupported address family");
+        }
+    }
+
     public void accept(L, F)(L loop, scope F f) {
         _handler = (scope AppEvent ev) {
             //
@@ -200,7 +234,7 @@ class Socket {
                 }
                 auto flags = fcntl(new_s, F_GETFL, 0) | O_NONBLOCK;
                 fcntl(new_s, F_SETFL, flags);
-                Socket ns = new Socket(_af, _sock_type, new_s);
+                hlSocket ns = new hlSocket(_af, _sock_type, new_s);
                 fd2so[new_s] = ns;
                 f(ns);
             }
@@ -348,27 +382,27 @@ private auto str2inetaddr(string addr) @safe pure {
     return tuple(core.sys.posix.arpa.inet.htonl(a), core.sys.posix.arpa.inet.htons(p));
 }
 
-unittest {
+@safe unittest {
     import core.sys.posix.arpa.inet;
     assert(str2inetaddr("0.0.0.0:1") == tuple(0, htons(1)));
     assert(str2inetaddr("1.0.0.0:0") == tuple(htonl(0x01000000),0 ));
     assert(str2inetaddr("255.255.255.255:0") == tuple(0xffffffff, 0));
 }
 
-unittest {
-    globalLogLevel = LogLevel.trace;
+@safe unittest {
+    globalLogLevel = LogLevel.info;
 
-    Socket s0;
+    hlSocket s0 = new hlSocket();
     s0.open();
-    Socket s1 = s0;
+    hlSocket s1 = s0;
     s0.close();
     s1.close();
 }
 
-unittest {
-    globalLogLevel = LogLevel.trace;
+@safe unittest {
+    globalLogLevel = LogLevel.info;
 
-    Socket s;
+    hlSocket s = new hlSocket();
     s.open();
     s.close();
 }

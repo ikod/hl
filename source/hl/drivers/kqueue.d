@@ -138,7 +138,8 @@ struct NativeEventLoopImpl {
                       null
                     : _calculate_timespec(deadline, &ts);
 
-            debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
+            debug tracef("waiting for %s", wait is null?"forewer":"%s".format(*wait));
+            debug tracef("waiting events %s", in_events[0..in_index]);
             ready = kevent(kqueue_fd,
                                 cast(kevent_t*)&in_events[0], in_index,
                                 cast(kevent_t*)&out_events[0], MAXEVENTS,
@@ -171,6 +172,9 @@ struct NativeEventLoopImpl {
                         if ( e.flags & EV_ERROR) {
                             ae |= AppEvent.ERR;
                         }
+                        if ( e.flags & EV_EOF) {
+                            ae |= AppEvent.HUP;
+                        }
                         int fd = cast(int)e.ident;
                         auto callback = fileHandlers[fd];
                         callback(fd, ae);
@@ -180,6 +184,9 @@ struct NativeEventLoopImpl {
                         AppEvent ae = AppEvent.OUT;
                         if ( e.flags & EV_ERROR) {
                             ae |= AppEvent.ERR;
+                        }
+                        if ( e.flags & EV_EOF) {
+                            ae |= AppEvent.HUP;
                         }
                         int fd = cast(int)e.ident;
                         auto callback = fileHandlers[fd];
@@ -270,9 +277,23 @@ struct NativeEventLoopImpl {
         timers.insert(t);
     }
 
-    bool cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
+    bool timer_cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
         foreach(ref o; out_events[0..ready]) {
             if ( o.ident == e.ident && o.filter == e.filter && o.udata == e.udata ) {
+                o.ident = 0;
+                o.filter = 0;
+                o.udata = null;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool fileio_cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
+        foreach(ref o; out_events[0..ready]) {
+            if ( o.ident == e.ident && o.filter == e.filter 
+                    && !(o.flags & EV_EOF) )
+            {
                 o.ident = 0;
                 o.filter = 0;
                 o.udata = null;
@@ -298,7 +319,7 @@ struct NativeEventLoopImpl {
         e.ident = 0;
         e.filter = EVFILT_TIMER;
         e.udata = cast(void*)t;
-        auto cleared = cleared_from_out_events(e);
+        auto cleared = timer_cleared_from_out_events(e);
 
         timers.removeFront();
         if ( timers.empty ) {
@@ -336,7 +357,7 @@ struct NativeEventLoopImpl {
         kevent_t e;
         e.ident = fd;
         e.filter = filter;
-        e.flags = EV_ADD;
+        e.flags = EV_ADD | EV_ONESHOT;
         if ( in_index == MAXEVENTS ) {
             flush();
         }
@@ -346,14 +367,16 @@ struct NativeEventLoopImpl {
     void stop_poll(int fd, AppEvent ev) @safe {
         assert(fd>=0);
         immutable filter = appEventToSysEvent(ev);
+        debug tracef("stop poll on fd %d for events %s", fd, appeventToString(ev));
         kevent_t e;
         e.ident = fd;
         e.filter = filter;
         e.flags = EV_DELETE;
 
-        auto cleared = cleared_from_out_events(e);
+        auto cleared = fileio_cleared_from_out_events(e);
 
         if ( cleared ) {
+            debug tracef("return because it is cleared");
             return;
         }
 
