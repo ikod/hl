@@ -52,13 +52,13 @@ struct FallbackEventLoopImpl {
 
     @disable this(this) {};
 
-    void initialize() {
+    void initialize() @safe {
         timers = new RedBlackTree!Timer();
     }
     void deinit() {
         timers = null;
     }
-    void stop() {
+    void stop() @safe {
         debug trace("mark eventloop as stopped");
         running = false;
     }
@@ -262,7 +262,7 @@ struct FallbackEventLoopImpl {
         timers.insert(t);
     }
 
-    void stop_timer(Timer t) {
+    void stop_timer(Timer t) @trusted {
         assert(!timers.empty, "You are trying to remove timer %s, but timer list is empty".format(t));
         debug tracef("remove timer %s", t);
         auto r = timers.equalRange(t);
@@ -273,7 +273,7 @@ struct FallbackEventLoopImpl {
         //d._polling |= ev;
         //files[fd] = d;
     }
-    void stop_poll(int fd, AppEvent ev) {
+    void stop_poll(int fd, AppEvent ev) @safe {
     
     }
     void flush() {

@@ -20,6 +20,7 @@ import core.stdc.string: strerror;
 import core.stdc.errno: errno;
 
 import hl.events;
+import hl.common;
 
 //enum : short {
 //    EVFILT_READ =      (-1),
@@ -56,6 +57,14 @@ import hl.events;
 //extern(C) int kqueue() @safe @nogc nothrow;
 //extern(C) int kevent(int kqueue_fd, const kevent_t *events, int ne, const kevent_t *events, int ne,timespec* timeout) @safe @nogc nothrow;
 
+auto s_kevent(A...)(A args) @trusted @nogc nothrow {
+    return kevent(args);
+}
+
+Timer udataToTimer(T)(T udata) @trusted {
+    return cast(Timer)udata;
+}
+
 struct NativeEventLoopImpl {
     immutable bool   native = true;
     immutable string _name = "kqueue";
@@ -76,26 +85,30 @@ struct NativeEventLoopImpl {
 
         Signal[][int]            signals;
         FileHandlerFunction[int] fileHandlers;
+
+        timespec    ts;
+
     }
-    void initialize() {
+    void initialize() @trusted {
         if ( kqueue_fd == -1) {
             kqueue_fd = kqueue();
         }
         debug tracef("kqueue_fd=%d", kqueue_fd);
         timers = new RedBlackTree!Timer();
     }
-    void deinit() {
+    void deinit() @safe {
         debug tracef("deinit");
         close(kqueue_fd);
         kqueue_fd = -1;
         in_index = 0;
         timers = null;
     }
-    void stop() {
+    void stop() @nogc @safe pure nothrow {
         running = false;
     }
 
-    timespec* _calculate_timespec(SysTime deadline, timespec* ts) {
+    timespec _calculate_timespec(SysTime deadline) @safe {
+        timespec ts;
         Duration delta = deadline - Clock.currTime;
         delta = max(delta, 0.seconds);
         debug tracef("delta = %s", delta);
@@ -105,12 +118,11 @@ struct NativeEventLoopImpl {
         return ts;
     }
 
-    void run(Duration d) {
+    void run(Duration d) @safe {
         running = true;
 
         immutable bool runIndefinitely = (d == Duration.max);
         SysTime     deadline;
-        timespec    ts;
         timespec*   wait;
 
         if ( !runIndefinitely ) {
@@ -130,17 +142,18 @@ struct NativeEventLoopImpl {
                 try {
                     h(AppEvent.TMO);
                 } catch (Exception e) {
-                    errorf("Uncaught exception: %s", e);
+                    errorf("Uncaught exception: %s", e.msg);
                 }
             }
+            ts = _calculate_timespec(deadline);
 
             wait = runIndefinitely ?
                       null
-                    : _calculate_timespec(deadline, &ts);
+                    : &ts;
 
             debug tracef("waiting for %s", wait is null?"forewer":"%s".format(*wait));
             debug tracef("waiting events %s", in_events[0..in_index]);
-            ready = kevent(kqueue_fd,
+            ready = s_kevent(kqueue_fd,
                                 cast(kevent_t*)&in_events[0], in_index,
                                 cast(kevent_t*)&out_events[0], MAXEVENTS,
                                 wait);
@@ -150,7 +163,7 @@ struct NativeEventLoopImpl {
 
 
             if ( ready < 0 ) {
-                errorf("kevent returned error %s", fromStringz(strerror(errno)));
+                error("kevent returned error %s".format(s_strerror(errno)));
             }
             enforce(ready >= 0);
             if ( ready == 0 ) {
@@ -200,9 +213,9 @@ struct NativeEventLoopImpl {
                          * we have to receive event only on the earliest timer in list
                         */
                         assert(!timers.empty, "timers empty on timer event: %s".format(out_events[0..ready]));
-                        if ( cast(Timer)e.udata != timers.front) {
-                            errorf("timer event: %s != timers.front: %s", cast(Timer)e.udata, timers.front);
-                            errorf("timers=%s", timers);
+                        if ( udataToTimer(e.udata) !is timers.front) {
+                            errorf("timer event: %s != timers.front: %s", udataToTimer(e.udata), timers.front);
+                            //errorf("timers=%s", to!string(timers));
                             errorf("events=%s", out_events[0..ready]);
                             assert(0);
                         }
@@ -217,12 +230,12 @@ struct NativeEventLoopImpl {
                             try {
                                 h(AppEvent.TMO);
                             } catch (Exception e) {
-                                errorf("Uncaught exception: %s", e);
+                                errorf("Uncaught exception: %s", e.msg);
                             }
                             // timer event handler can try to stop exactly this timer,
                             // so when we returned from handler we can have different front
                             // and we do not have to remove it.
-                            if ( !timers.empty && timers.front == t ) {
+                            if ( !timers.empty && timers.front is t ) {
                                 timers.removeFront;
                             }
                             now = Clock.currTime;
@@ -248,7 +261,7 @@ struct NativeEventLoopImpl {
                                 SigHandlerDelegate h = s._handler;
                                 h(signum);
                             } catch (Exception e) {
-                                errorf("Uncaught exception: %s", e);
+                                errorf("Uncaught exception: %s", e.msg);
                             }
                         }
                         continue;
@@ -289,21 +302,7 @@ struct NativeEventLoopImpl {
         return false;
     }
 
-    bool fileio_cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
-        foreach(ref o; out_events[0..ready]) {
-            if ( o.ident == e.ident && o.filter == e.filter 
-                    && !(o.flags & EV_EOF) )
-            {
-                o.ident = 0;
-                o.filter = 0;
-                o.udata = null;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void stop_timer(Timer t) {
+    void stop_timer(Timer t) @trusted {
 
         assert(!timers.empty, "You are trying to remove timer %s, but timer list is empty".format(t));
 
@@ -357,7 +356,7 @@ struct NativeEventLoopImpl {
         kevent_t e;
         e.ident = fd;
         e.filter = filter;
-        e.flags = EV_ADD | EV_ONESHOT;
+        e.flags = EV_ADD;
         if ( in_index == MAXEVENTS ) {
             flush();
         }
@@ -371,21 +370,15 @@ struct NativeEventLoopImpl {
         kevent_t e;
         e.ident = fd;
         e.filter = filter;
-        e.flags = EV_DELETE;
-
-        auto cleared = fileio_cleared_from_out_events(e);
-
-        if ( cleared ) {
-            debug tracef("return because it is cleared");
-            return;
-        }
+        e.flags = EV_DELETE|EV_DISABLE;
 
         if ( in_index == MAXEVENTS ) {
             flush();
         }
         in_events[in_index++] = e;
+        flush();
     }
-    void _add_kernel_timer(in Timer t, in Duration d) {
+    void _add_kernel_timer(in Timer t, in Duration d) @trusted {
         debug tracef("add kernel timer %s, delta %s", t, d);
         assert(d >= 0.seconds);
         intptr_t delay_ms = d.split!"msecs".msecs;
@@ -403,7 +396,7 @@ struct NativeEventLoopImpl {
 
     alias _mod_kernel_timer = _add_kernel_timer;
 
-    void _del_kernel_timer() {
+    void _del_kernel_timer() @safe {
         debug trace("del kernel timer");
         kevent_t e;
         e.ident = 0;
@@ -491,7 +484,7 @@ struct NativeEventLoopImpl {
 
 auto appEventToSysEvent(AppEvent ae) {
     import core.bitop;
-    assert( popcnt(ae) == 1, "Set one event at a time");
+    assert( popcnt(ae) == 1, "Set one event at a time, you tried %x, %s".format(ae, appeventToString(ae)));
     assert( ae <= AppEvent.CONN, "You can ask for IN,OUT,CONN events");
     switch ( ae ) {
         case AppEvent.IN:

@@ -31,7 +31,10 @@ import core.stdc.string;
 import core.stdc.errno;
 
 import hl.events;
+import hl.common;
 import nbuff;
+
+import hl;
 
 //alias Socket = RefCounted!SocketImpl;
 
@@ -44,10 +47,11 @@ static ~this() {
 
 hlSocket[int] fd2so;
 
-void loopCallback(int fd, AppEvent ev) {
+void loopCallback(int fd, AppEvent ev) @safe {
     debug tracef("loopCallback for %d", fd);
     hlSocket s = fd2so[fd];
     if ( s && s._fileno >= 0) {
+        debug tracef("calling handler(%s) for %s", appeventToString(ev), s);
         s._handler(ev);
     } else {
         infof("impossible event %s on fd: %d", appeventToString(ev), fd);
@@ -68,20 +72,27 @@ class hlSocket {
         HandlerDelegate _handler;
         AppEvent        _polling = AppEvent.NONE;
         size_t          _buffer_size = 16*1024;
+        hlEvLoop        _loop;
+        immutable string          _file;
+        immutable int             _line;
     }
 
-    this(ubyte af = AF_INET, int sock_type = SOCK_STREAM) @safe {
+    this(ubyte af = AF_INET, int sock_type = SOCK_STREAM, string f = __FILE__, int l =  __LINE__) @safe {
         debug tracef("create socket");
         _af = af;
         _sock_type = sock_type;
+        _file = f;
+        _line = l;
     }
 
-    this(ubyte af, int sock_type, int s)
+    this(ubyte af, int sock_type, int s, string f = __FILE__, int l =  __LINE__)
     in {assert(s>=0);}
     body {
-        this._af = af;
-        this._sock_type = sock_type;
-        this._fileno = s;
+        _af = af;
+        _sock_type = sock_type;
+        _fileno = s;
+        _file = f;
+        _line = l;
         auto flags = fcntl(_fileno, F_GETFL, 0) | O_NONBLOCK;
         fcntl(_fileno, F_SETFL, flags);
     }
@@ -92,6 +103,12 @@ class hlSocket {
             .close(_fileno);
         }
     }
+    
+    override string toString() const @safe {
+        import std.format: format;
+        return "socket: fileno: %d, (%s:%d)".format(_fileno, _file, _line);
+    }
+
     public auto fileno() const pure @safe nothrow {
         return _fileno;
     }
@@ -110,14 +127,22 @@ class hlSocket {
         if ( rc != 0 ) {
              throw new Exception(to!string(strerror(errno())));
         }
+        rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
+        if ( rc != 0 ) {
+             throw new Exception(to!string(strerror(errno())));
+        }
         auto flags = fcntl(_fileno, F_GETFL, 0) | O_NONBLOCK;
         fcntl(_fileno, F_SETFL, flags);
         return _fileno;
     }
 
     public void close() @safe {
-        debug tracef("closing %d", _fileno);
         if ( _fileno != -1 ) {
+            debug tracef("closing %d", _fileno);
+            if ( _loop && _polling != AppEvent.NONE ) {
+                debug tracef("detach from polling for %s", appeventToString(_polling));
+                _loop.stopPoll(_fileno, _polling);
+            }
             fd2so[_fileno] = null;
             .close(_fileno);
             _fileno = -1;
@@ -170,7 +195,7 @@ class hlSocket {
         loop.stopPoll(_fileno, _polling);
     }
 
-    public void connect(L, F)(string addr, L loop, scope F f, Duration timeout) {
+    public void connect(L, F)(string addr, L loop, scope F f, Duration timeout) @safe {
          switch (_af) {
              case AF_INET:
                  {
@@ -182,10 +207,9 @@ class hlSocket {
                      sin.sin_port = internet_addr[1];
                      sin.sin_addr = in_addr(internet_addr[0]);
                      uint sa_len = sin.sizeof;
-                     auto rc = .connect(_fileno, cast(sockaddr*)&sin, sa_len);
-                     debug tracef("connect(%s) = %d", addr, rc);
+                     auto rc = (() @trusted => .connect(_fileno, cast(sockaddr*)&sin, sa_len))();
                      if ( rc == -1 && errno() != EINPROGRESS ) {
-                        debug tracef("connect errno: %s", to!string(strerror(errno())));
+                        debug tracef("connect errno: %s", s_strerror(errno()));
                         f(AppEvent.ERR);
                         return;
                      }
@@ -204,7 +228,7 @@ class hlSocket {
     }
 
     public void accept(L, F)(L loop, scope F f) {
-        _handler = (scope AppEvent ev) {
+        _handler = (scope AppEvent ev) @trusted {
             //
             // call accept until there is no more connections in the queue
             // but no more than ACCEPTS_IN_A_ROW
@@ -212,7 +236,6 @@ class hlSocket {
             enum ACCEPTS_IN_A_ROW = 10;
             foreach(_; 0..ACCEPTS_IN_A_ROW) {
                 sockaddr sa;
-                debug tracef("Accept handler on: %d", _fileno);
                 uint sa_len = sa.sizeof;
                 int new_s = .accept(_fileno, &sa, &sa_len);
                 if ( new_s == -1 ) {
@@ -227,8 +250,12 @@ class hlSocket {
                     throw new Exception(to!string(strerror(err)));
                 }
                 debug tracef("New socket fd: %d", new_s);
-                int flag = 1;
+                immutable int flag = 1;
                 auto rc = .setsockopt(new_s, IPPROTO_TCP, TCP_NODELAY, &flag, flag.sizeof);
+                if ( rc != 0 ) {
+                     throw new Exception(to!string(strerror(errno())));
+                }
+                rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
                 if ( rc != 0 ) {
                      throw new Exception(to!string(strerror(errno())));
                 }
@@ -251,6 +278,7 @@ class hlSocket {
         ubyte[]             input;
         immutable(ubyte)[]  output = iorq.output;
 
+        _loop = loop;
         Timer t;
 
         AppEvent ev = AppEvent.NONE;
@@ -265,11 +293,13 @@ class hlSocket {
         assert(pollingFor != AppEvent.NONE);
 
         if ( timeout > 0.seconds ) {
-            HandlerDelegate terminate = (AppEvent e) {
+            HandlerDelegate terminate = (AppEvent e) @safe {
                 debug tracef("io timedout");
-                _polling ^= ev;
                 loop.stopPoll(_fileno, ev);
-                result.input = assumeUnique(input);
+                _polling = AppEvent.NONE;
+                delegate void() @trusted {
+                    result.input = assumeUnique(input);
+                }();
                 result.output = output;
                 result.timedout = true;
                 iorq.callback(result);
@@ -277,12 +307,12 @@ class hlSocket {
             t = new Timer(timeout, terminate);
             loop.startTimer(t);
         }
-        _handler = (AppEvent ev) {
-            tracef("event %s on fd %d", appeventToString(ev), _fileno);
+        _handler = (AppEvent ev) @trusted {
+            debug tracef("event %s on fd %d", appeventToString(ev), _fileno);
             if ( ev & AppEvent.IN )
             {
                 ubyte[] b = new ubyte[](min(_buffer_size, to_read));
-                auto rc = .recv(_fileno, b.ptr, _buffer_size, 0);
+                auto rc = .recv(_fileno, &b[0], _buffer_size, 0);
                 debug tracef("recv on fd %d returned %d", _fileno, rc);
                 if ( rc < 0 )
                 {
@@ -305,8 +335,8 @@ class hlSocket {
                     b = null;
                     to_read -= rc;
                     if ( to_read == 0 || iorq.allowPartialInput ) {
-                        _polling ^= pollingFor;
                         loop.stopPoll(_fileno, pollingFor);
+                        _polling = AppEvent.NONE;
                         if ( t ) {
                             loop.stopTimer(t);
                             t = null;
@@ -320,7 +350,6 @@ class hlSocket {
                 if ( rc == 0 )
                 {
                     // socket closed
-                    _polling ^= pollingFor;
                     loop.stopPoll(_fileno, pollingFor);
                     if ( t ) {
                         loop.stopTimer(t);
@@ -328,6 +357,7 @@ class hlSocket {
                     }
                     result.input = assumeUnique(input);
                     result.output = output;
+                    _polling = AppEvent.NONE;
                     iorq.callback(result);
                     return;
                 }
@@ -335,13 +365,12 @@ class hlSocket {
             if ( ev & AppEvent.OUT ) {
                 debug tracef("sending %s", output);
                 assert(output.length>0);
-                auto rc = .send(_fileno, output.ptr, output.length, 0);
+                auto rc = .send(_fileno, &output[0], output.length, 0);
                 if ( rc < 0 ) {
                     // error sending
                 }
                 output = output[rc..$];
                 if ( output.length == 0 ) {
-                    _polling ^= pollingFor;
                     loop.stopPoll(_fileno, pollingFor);
                     if ( t ) {
                         loop.stopTimer(t);
@@ -349,6 +378,7 @@ class hlSocket {
                     }
                     result.input = assumeUnique(input);
                     result.output = output;
+                    _polling = AppEvent.NONE;
                     iorq.callback(result);
                     return;
                 }
@@ -362,8 +392,11 @@ class hlSocket {
         return 0;
     }
 
-    long send(immutable(ubyte)[] data) {
+    long send(immutable(ubyte)[] data) @trusted {
         return .send(_fileno, data.ptr, data.length, 0);
+    }
+    void send(immutable(ubyte)[] data, Duration timeout) {
+    
     }
 }
 

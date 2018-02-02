@@ -16,10 +16,10 @@ import nbuff;
 
 
 void main(string[] args){
-    globalLogLevel = LogLevel.info;
+    globalLogLevel = LogLevel.trace;
 
-    auto loop = getEventLoop();
-    auto server = new Socket();
+    auto loop = getDefaultLoop();
+    auto server = new hlSocket();
     auto fd = server.open();
     assert(fd >= 0);
     scope(exit) {
@@ -33,7 +33,7 @@ void main(string[] args){
     immutable(ubyte)[] input;
     immutable(ubyte)[] output = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
 
-    void exchange(Socket s) @safe {
+    void exchange(hlSocket s) @safe {
         auto done = (IOResult r) {
             if ( r.timedout ) {
                 info("Timedout on write");
@@ -46,7 +46,6 @@ void main(string[] args){
                 s.close();
                 return;
             }
-            tracef("got input, ready to send");
             IORequest out_iorq;
             out_iorq.output = output;
             out_iorq.callback = done;
@@ -57,7 +56,7 @@ void main(string[] args){
         in_iorq.callback = on_read;
         s.io(loop, in_iorq, dur!"msecs"(opt));
     }
-    void delegate(Socket) accept = (Socket s) {
+    void delegate(hlSocket) accept = (hlSocket s) {
         exchange(s);
     };
     server.bind("127.0.0.1:16000");

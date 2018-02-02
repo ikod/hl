@@ -29,9 +29,9 @@ static this() {
     ];
 }
 
-alias HandlerDelegate = void delegate(AppEvent);
-alias SigHandlerDelegate = void delegate(int);
-alias FileHandlerFunction = void function(int, AppEvent);
+alias HandlerDelegate = void delegate(AppEvent) @safe;
+alias SigHandlerDelegate = void delegate(int) @safe;
+alias FileHandlerFunction = void function(int, AppEvent) @safe;
 
 string appeventToString(AppEvent ev) @safe pure {
     import std.format;
@@ -83,6 +83,8 @@ final class Timer : CanPoll {
         immutable ulong           _id;
         immutable SysTime         _expires;
         immutable HandlerDelegate _handler;
+        immutable string          _file;
+        immutable int             _line;
     }
     int opCmp(in Timer other) const nothrow pure @safe {
         int timeCmp = _expires.opCmp(other._expires);
@@ -91,22 +93,31 @@ final class Timer : CanPoll {
         }
         return _id < other._id ? -1 : 1;
     }
-    this(Duration d, HandlerDelegate h) @safe {
+
+    bool eq(const Timer b) const pure nothrow @safe {
+        return this._id == b._id && this._expires == b._expires && this._handler == b._handler;
+    }
+    
+    this(Duration d, HandlerDelegate h, string f = __FILE__, int l =  __LINE__) @safe {
         _expires = Clock.currTime + d;
         _handler = h;
         _id = timer_id;
+        _file = f;
+        _line = l;
         timer_id++;
     }
-    this(SysTime e, HandlerDelegate h) @safe {
+    this(SysTime e, HandlerDelegate h, string f = __FILE__, int l =  __LINE__) @safe {
         enforce(e != SysTime.init, "Unintialized expires for new timer");
         enforce(h != HandlerDelegate.init, "Unitialized handler for new Timer");
         _expires = e;
         _handler = h;
+        _file = f;
+        _line = l;
         _id = timer_id++;
     }
-    override string toString() const {
+    override string toString() const @trusted {
         import std.format: format;
-        return "timer: expires: %s, id: %d, addr %X".format(_expires, _id, cast(void*)this);
+        return "timer: expires: %s, id: %d, addr %X (%s:%d)".format(_expires, _id, cast(void*)this, _file, _line);
     }
 }
 
@@ -129,7 +140,7 @@ final class Signal : CanPoll {
         }
         return _signum < other._signum ? -1 : 1;
     }
-    override string toString() const {
+    override string toString() const @trusted {
         import std.format: format;
         return "signal: signum: %d, id: %d".format(_signum, _id);
     }
@@ -140,7 +151,7 @@ struct IORequest {
     immutable           allowPartialInput = true;
     immutable(ubyte)[]  output;
 
-    void delegate(IOResult) callback;
+    void delegate(IOResult) @safe callback;
 }
 
 struct IOResult {
