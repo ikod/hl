@@ -36,15 +36,16 @@ struct NativeEventLoopImpl {
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
         Signal[][int]           signals;
+        FileHandlerFunction[int] fileHandlers;
     }
     @disable this(this) {}
 
-    void initialize() {
+    void initialize() @safe {
         if ( epoll_fd == -1 ) {
-            epoll_fd = epoll_create(MAXEVENTS);
+            epoll_fd = (() @trusted  => epoll_create(MAXEVENTS))();
         }
         if ( timer_fd == -1 ) {
-            timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+            timer_fd = (() @trusted => timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK))();
         }
         timers = new RedBlackTree!Timer();
     }
@@ -56,7 +57,7 @@ struct NativeEventLoopImpl {
         timers = null;
     }
 
-    void stop() {
+    void stop() @safe {
         running = false;
     }
 
@@ -102,6 +103,7 @@ struct NativeEventLoopImpl {
                 _calculate_timeout(deadline);
 
             uint ready = epoll_wait(epoll_fd, &events[0], MAXEVENTS, timeout_ms);
+            debug tracef("got %d events", ready);
             if ( ready == 0 ) {
                 debug trace("epoll timedout and no events to process");
                 return;
@@ -110,87 +112,88 @@ struct NativeEventLoopImpl {
                 errorf("epoll_wait returned error %s", fromStringz(strerror(errno)));
             }
             enforce(ready >= 0);
-            if ( ready > 0 ) {
-                foreach(i; 0..ready) {
-                    auto e = events[i];
-                    debug tracef("got event %s", e);
-                    CanPoll p = cast(CanPoll)e.data.ptr;
+            debug tracef("events: %s", events[0..ready]);
+            foreach(i; 0..ready) {
+                auto e = events[i];
+                debug tracef("got event %s", e);
+                CanPoll p = cast(CanPoll)e.data.ptr;
 
-                    if ( p.id.fd == timer_fd ) {
-                        // with EPOLLET flag I dont have to read from timerfd, otherwise I ahve to:
-                        // ubyte[8] v;
-                        // read(timer_fd, &v[0], 8);
+                if ( p !is null && p.id.fd == timer_fd ) {
+                    // with EPOLLET flag I dont have to read from timerfd, otherwise I ahve to:
+                    // ubyte[8] v;
+                    // read(timer_fd, &v[0], 8);
 
-                        auto now = Clock.currTime;
-                        /*
-                         * Invariants for timers
-                         * ---------------------
-                         * timer list must not be empty at event.
-                         * we have to receive event only on the earliest timer in list
-                        **/
-                        assert(!timers.empty, "timers empty on timer event");
-                        assert(timers.front._expires <= now);
+                    auto now = Clock.currTime;
+                    /*
+                     * Invariants for timers
+                     * ---------------------
+                     * timer list must not be empty at event.
+                     * we have to receive event only on the earliest timer in list
+                    **/
+                    assert(!timers.empty, "timers empty on timer event");
+                    assert(timers.front._expires <= now);
 
-                        do {
-                            debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
-                            Timer t = timers.front;
-                            HandlerDelegate h = t._handler;
-                            timers.removeFront;
-                            try {
-                                h(AppEvent.TMO);
-                            } catch (Exception e) {
-                                errorf("Uncaught exception: %s", e);
-                            }
-                            now = Clock.currTime;
-                        } while (!timers.empty && timers.front._expires <= now );
-
-                        if ( ! timers.empty ) {
-                            Duration kernel_delta = timers.front._expires - now;
-                            assert(kernel_delta > 0.seconds);
-                            _mod_kernel_timer(timers.front, kernel_delta);
-                        } else {
-                            // delete kernel timer so we can add it next time
-                            _del_kernel_timer();
+                    do {
+                        debug tracef("processing %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
+                        Timer t = timers.front;
+                        HandlerDelegate h = t._handler;
+                        timers.removeFront;
+                        try {
+                            h(AppEvent.TMO);
+                        } catch (Exception e) {
+                            errorf("Uncaught exception: %s", e);
                         }
-                        continue;
+                        now = Clock.currTime;
+                    } while (!timers.empty && timers.front._expires <= now );
+
+                    if ( ! timers.empty ) {
+                        Duration kernel_delta = timers.front._expires - now;
+                        assert(kernel_delta > 0.seconds);
+                        _mod_kernel_timer(timers.front, kernel_delta);
+                    } else {
+                        // delete kernel timer so we can add it next time
+                        _del_kernel_timer();
                     }
-                    if ( p.id.fd == signal_fd ) {
-                        enum siginfo_items = 8;
-                        signalfd_siginfo[siginfo_items] info;
-                        debug trace("got signal");
-                        assert(signal_fd != -1);
-                        while (true) {
-                            auto rc = read(signal_fd, &info, info.sizeof);
-                            if ( rc < 0 && errno == EAGAIN ) {
-                                break;
-                            }
-                            enforce(rc > 0);
-                            auto got_signals = rc / signalfd_siginfo.sizeof;
-                            debug tracef("read info %d, %s", got_signals, info[0..got_signals]);
-                            foreach(si; 0..got_signals) {
-                                auto signum = info[si].ssi_signo;
-                                debug tracef("signum: %d", signum);
-                                foreach(s; signals[signum]) {
-                                    debug tracef("processing signal handler %s", s);
-                                    try {
-                                        SigHandlerDelegate h = s._handler;
-                                        h(signum);
-                                    } catch (Exception e) {
-                                        errorf("Uncaught exception: %s", e);
-                                    }
+                    continue;
+                }
+                if ( p !is null && p.id.fd == signal_fd ) {
+                    enum siginfo_items = 8;
+                    signalfd_siginfo[siginfo_items] info;
+                    debug trace("got signal");
+                    assert(signal_fd != -1);
+                    while (true) {
+                        auto rc = read(signal_fd, &info, info.sizeof);
+                        if ( rc < 0 && errno == EAGAIN ) {
+                            break;
+                        }
+                        enforce(rc > 0);
+                        auto got_signals = rc / signalfd_siginfo.sizeof;
+                        debug tracef("read info %d, %s", got_signals, info[0..got_signals]);
+                        foreach(si; 0..got_signals) {
+                            auto signum = info[si].ssi_signo;
+                            debug tracef("signum: %d", signum);
+                            foreach(s; signals[signum]) {
+                                debug tracef("processing signal handler %s", s);
+                                try {
+                                    SigHandlerDelegate h = s._handler;
+                                    h(signum);
+                                } catch (Exception e) {
+                                    errorf("Uncaught exception: %s", e);
                                 }
                             }
                         }
                     }
-                    //HandlerDelegate h = cast(HandlerDelegate)e.data.ptr;
-                    //AppEvent appEvent = AppEvent(sysEventToAppEvent(e.events), -1);
-                    //h(appEvent);
+                    continue;
                 }
+                //debug tracef("process %s", e.data.fd);
+                //HandlerDelegate h = cast(HandlerDelegate)e.data.ptr;
+                //AppEvent appEvent = AppEvent(sysEventToAppEvent(e.events), -1);
+                //h(appEvent);
             }
         }
     }
-    void start_timer(Timer t) {
-        debug tracef("insert timer %s - %X", t, cast(void*)t);
+    void start_timer(Timer t) @safe {
+        debug tracef("insert timer %s", t);
         t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
@@ -208,10 +211,10 @@ struct NativeEventLoopImpl {
         timers.insert(t);
     }
 
-    void stop_timer(Timer t) {
+    void stop_timer(Timer t) @safe {
         debug tracef("remove timer %s", t);
 
-        if ( t != timers.front ) {
+        if ( t !is timers.front ) {
             auto r = timers.equalRange(t);
             timers.remove(r);
             return;
@@ -231,7 +234,7 @@ struct NativeEventLoopImpl {
         _del_kernel_timer();
     }
 
-    void _add_kernel_timer(Timer t, in Duration d) {
+    void _add_kernel_timer(Timer t, in Duration d) @trusted {
         debug trace("add kernel timer");
         assert(d > 0.seconds);
         itimerspec itimer;
@@ -246,7 +249,7 @@ struct NativeEventLoopImpl {
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
     }
-    void _mod_kernel_timer(Timer t, in Duration d) {
+    void _mod_kernel_timer(Timer t, in Duration d) @trusted {
         debug tracef("mod kernel timer to %s", t);
         assert(d > 0.seconds);
         itimerspec itimer;
@@ -261,7 +264,7 @@ struct NativeEventLoopImpl {
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, timer_fd, &e);
         enforce(rc >= 0);
     }
-    void _del_kernel_timer() {
+    void _del_kernel_timer() @trusted {
         debug trace("del kernel timer");
         epoll_event e;
         e.events = EPOLLIN;
@@ -337,12 +340,35 @@ struct NativeEventLoopImpl {
         signalfd(signal_fd, &mask, 0);
     }
 
-    void start_poll(FileDescriptor d, AppEvent ev) pure nothrow @safe {
-        //immutable fd = d._fileno;
-        //d._polling |= ev;
-        //files[fd] = d;
+    //
+    // files/sockets
+    //
+    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @trusted {
+        epoll_event e;
+        e.events = appEventToSysEvent(ev);
+        e.data.fd = fd;
+        auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
+        enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
+        fileHandlers[fd] = f;
     }
-    void stop_poll(FileDescriptor d, AppEvent ev) {
-    
+
+    void stop_poll(int fd, AppEvent ev) @safe {
+
+    }
+    auto appEventToSysEvent(AppEvent ae) pure @safe {
+        import core.bitop;
+        assert( popcnt(ae) == 1, "Set one event at a time, you tried %x, %s".format(ae, appeventToString(ae)));
+        assert( ae <= AppEvent.CONN, "You can ask for IN,OUT,CONN events");
+        switch ( ae ) {
+            case AppEvent.IN:
+                return EPOLLIN;
+            case AppEvent.OUT:
+                return EPOLLOUT;
+            //case AppEvent.CONN:
+            //    return EVFILT_READ;
+            default:
+                throw new Exception("You can't wait for event %X".format(ae));
+        }
     }
 }
+
