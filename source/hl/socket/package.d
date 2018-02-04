@@ -66,15 +66,15 @@ class SocketException : Exception {
 
 class hlSocket {
     private {
-        immutable ubyte _af = AF_INET;
-        immutable int   _sock_type = SOCK_STREAM;
-        int             _fileno = -1;
-        HandlerDelegate _handler;
-        AppEvent        _polling = AppEvent.NONE;
-        size_t          _buffer_size = 16*1024;
-        hlEvLoop        _loop;
-        immutable string          _file;
-        immutable int             _line;
+        immutable ubyte      _af = AF_INET;
+        immutable int        _sock_type = SOCK_STREAM;
+        int                  _fileno = -1;
+        HandlerDelegate      _handler;
+        AppEvent             _polling = AppEvent.NONE;
+        size_t               _buffer_size = 16*1024;
+        hlEvLoop             _loop;
+        immutable string     _file;
+        immutable int        _line;
     }
 
     this(ubyte af = AF_INET, int sock_type = SOCK_STREAM, string f = __FILE__, int l =  __LINE__) @safe {
@@ -215,6 +215,7 @@ class hlSocket {
                      }
                      _handler = (AppEvent ev) {
                         debug tracef("connection event: %s", appeventToString(ev));
+                        _polling = AppEvent.NONE;
                         loop.stopPoll(_fileno, AppEvent.OUT);
                         f(ev);
                      };
@@ -271,7 +272,7 @@ class hlSocket {
         loop.startPoll(_fileno, AppEvent.IN, &loopCallback);
     }
 
-    auto io(L)(L loop, in IORequest iorq, in Duration timeout) @safe {
+    auto io(hlEvLoop loop, in IORequest iorq, in Duration timeout) @safe {
         IOResult result;
 
         size_t              to_read = iorq.to_read;
@@ -317,10 +318,10 @@ class hlSocket {
                 if ( rc < 0 )
                 {
                     result.error = true;
-                    _polling ^= pollingFor;
-                    loop.stopPoll(_fileno, pollingFor);
+                    _polling &= pollingFor ^ AppEvent.ALL;
+                    _loop.stopPoll(_fileno, pollingFor);
                     if ( t ) {
-                        loop.stopTimer(t);
+                        _loop.stopTimer(t);
                         t = null;
                     }
                     result.input = assumeUnique(input);
@@ -439,3 +440,39 @@ private auto str2inetaddr(string addr) @safe pure {
     s.open();
     s.close();
 }
+
+//unittest {
+//    globalLogLevel = LogLevel.trace;
+//
+//    hlSocket s = new hlSocket();
+//    s.open();
+//
+//
+//    auto mockLoop = new hlEvLoop();
+//    mockLoop.run = (Duration d) {
+//        s._handler(AppEvent.IN);
+//    };
+//
+//    mockLoop.startPoll = (int fd, AppEvent ev, FileHandlerFunction f) @safe {
+//        tracef("called mock startPoll: %d, %s", fd, appeventToString(ev));
+//    };
+//
+//    mockLoop.stopPoll = (int fd, AppEvent ev) @safe {
+//        tracef("called mock stopPoll: %d, %s", fd, appeventToString(ev));
+//    };
+//
+//    IORequest iorq;
+//    iorq.to_read = 1;
+//    iorq.output = "abc".representation();
+//    iorq.callback = (IOResult r) {
+//        tracef("called mock callback: %s", r);
+//    };
+//    auto result = s.io(mockLoop, iorq, 1.seconds);
+//    mockLoop.run(1.seconds);
+//    assert(s._polling == AppEvent.NONE);
+//    iorq.to_read = 0;
+//    result = s.io(mockLoop, iorq, 1.seconds);
+//    mockLoop.run(1.seconds);
+//    assert(s._polling == AppEvent.NONE);
+//    s.close();
+//}

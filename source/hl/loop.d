@@ -273,29 +273,109 @@ unittest {
 unittest {
     globalLogLevel = LogLevel.info;
     info(" === Testing sockets ===");
+    import std.string, std.stdio;
     import hl.socket: hlSocket;
-    auto loop = getDefaultLoop();
-    auto server = new hlSocket();
-    auto fd = server.open();
-    //server.close();
-    assert(fd >= 0);
-    assertThrown!Exception(server.bind("a:b:c"));
-    void function(hlSocket) f = (hlSocket s) {
-        tracef("accepted", s);
-        s.close();
-    };
-    server.bind("127.0.0.1:16000");
-    server.listen();
-    server.accept(loop, f);
-    loop.run(10.seconds);
-    server.close();
-    //globalLogLevel = LogLevel.trace;
-    //auto fallback_loop = getFallBackEventLoop();
-    //server = Socket();
-    //server.open();
-    //server.bind("127.0.0.1:16000");
-    //server.listen();
-    //server.accept(fallback_loop, f);
-    //fallback_loop.startPoll(server.descriptor(), AppEvent.IN);
-    //fallback_loop.run(100.seconds);
+
+    auto native = new hlEvLoop();
+    auto fallb = new hlEvLoop(Mode.FALLBACK);
+    auto loops = [native, fallb];
+    foreach(loop; loops) {
+        infof("testing loop '%s'", loop.name);
+        immutable limit = 5;
+        int resuests = 0;
+        int responses = 0;
+        //auto server = new hlSocket();
+        //auto fd = server.open();
+        ////server.close();
+        //assert(fd >= 0);
+        //assertThrown!Exception(server.bind("a:b:c"));
+        //void function(hlSocket) f = (hlSocket s) {
+        //    tracef("accepted", s);
+        //    s.close();
+        //};
+        //server.bind("127.0.0.1:16000");
+        //server.listen();
+        //server.accept(loop, f);
+        //loop.run(10.seconds);
+        //server.close();
+        //globalLogLevel = LogLevel.trace;
+        //auto fallback_loop = getFallBackEventLoop();
+        //server = Socket();
+        //server.open();
+        //server.bind("127.0.0.1:16000");
+        //server.listen();
+        //server.accept(fallback_loop, f);
+        //fallback_loop.startPoll(server.descriptor(), AppEvent.IN);
+        //fallback_loop.run(100.seconds);
+        hlSocket client, server;
+        immutable(ubyte)[] input;
+        immutable(ubyte)[] response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
+        string request = "GET / HTTP/1.1\r\nId: %d\r\n\r\n";
+    
+        void server_handler(hlSocket s) @safe {
+            tracef("server accepted on %s", s.fileno());
+            IORequest iorq;
+            iorq.to_read = 512;
+            iorq.callback = (IOResult r) {
+                if ( r.timedout ) {
+                    s.close();
+                    return;
+                }
+                s.send(response);
+                s.close();
+            };
+            s.io(loop, iorq, dur!"seconds"(10));
+        }
+    
+        void client_handler(AppEvent e) @safe {
+            tracef("connection app handler");
+            if ( e & AppEvent.ERR ) {
+                infof("error on %s", client);
+                client.close();
+                return;
+            }
+            tracef("sending to %s", client);
+            auto rc = client.send(request.format(resuests).representation());
+            tracef("send returned %d", rc);
+            IORequest iorq;
+            iorq.to_read = 512;
+            iorq.callback = (IOResult r) {
+                if ( r.timedout ) {
+                    info("Client timeout waiting for response");
+                    client.close();
+                    return;
+                }
+                // we received response
+                responses++;
+                client.close();
+                if ( ++resuests < limit ) {
+                    client = new hlSocket();
+                    client.open();
+                    client.connect("127.0.0.1:16000", loop, &client_handler, dur!"seconds"(5));
+                }
+            };
+            client.io(loop, iorq, 10.seconds);
+        }
+    
+        server = new hlSocket();
+        server.open();
+        assert(server.fileno() >= 0);
+        scope(exit) {
+            debug tracef("closing server socket %s", server);
+            server.close();
+        }
+        tracef("server listen on %d", server.fileno());
+        server.bind("0.0.0.0:16000");
+        server.listen();
+        server.accept(loop, &server_handler);
+    
+        client = new hlSocket();
+        client.open();
+        loop.startTimer(new Timer(50.msecs,  (AppEvent e) @safe {
+            client.connect("127.0.0.1:16000", loop, &client_handler, dur!"seconds"(5));
+        }));
+    
+        loop.run(1.seconds);
+        assert(responses == limit);
+    }
 }

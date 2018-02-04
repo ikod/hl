@@ -14,6 +14,7 @@ enum AppEvent : int {
     CONN = 0x08,
     HUP  = 0x10,
     TMO  = 0x20,
+    ALL  = 0x3f
 }
 private immutable string[int] _names;
 
@@ -54,21 +55,21 @@ class NotFoundException : Exception {
     }
 }
 
-final class FileDescriptor {
-    package {
-        immutable int   _fileno;
-        HandlerDelegate _handler;
-        AppEvent        _polling;
-    }
-    this(int fileno) nothrow @safe {
-        _fileno = fileno;
-    }
-    override string toString() const @safe {
-        import std.format: format;
-        return appeventToString(_polling);
-        //return "FileDescriptor: filehandle: %d, events: %s".format(_fileno, appeventToString(_polling));
-    }
-}
+//final class FileDescriptor {
+//    package {
+//        immutable int   _fileno;
+//        HandlerDelegate _handler;
+//        AppEvent        _polling;
+//    }
+//    this(int fileno) nothrow @safe {
+//        _fileno = fileno;
+//    }
+//    override string toString() const @safe {
+//        import std.format: format;
+//        return appeventToString(_polling);
+//        //return "FileDescriptor: filehandle: %d, events: %s".format(_fileno, appeventToString(_polling));
+//    }
+//}
 
 class CanPoll {
     union Id {

@@ -18,7 +18,14 @@ import nbuff;
 void main(string[] args){
     globalLogLevel = LogLevel.trace;
 
-    auto loop = getDefaultLoop();
+    int opt = 1000;      // recv/send timeout in ms
+    int td  = 10;   // test duration in seconds
+    bool  fallback = false;
+
+    getopt(args, "tmo", &opt, "dur", &td, "fallback", &fallback);
+    
+
+    auto loop = getDefaultLoop(!fallback ? Mode.NATIVE : Mode.FALLBACK);
     auto server = new hlSocket();
     auto fd = server.open();
     assert(fd >= 0);
@@ -26,10 +33,6 @@ void main(string[] args){
         server.close();
     }
 
-    int opt = 1000;      // recv/send timeout in ms
-    int td  = 10;   // test duration in seconds
-    getopt(args, "tmo", &opt, "dur", &td);
-    
     immutable(ubyte)[] input;
     immutable(ubyte)[] output = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
 

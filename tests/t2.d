@@ -18,7 +18,13 @@ import nbuff;
 void main(string[] args){
     globalLogLevel = LogLevel.trace;
 
-    auto loop = getDefaultLoop();
+    int   tm = 1000;      // recv/send timeout in ms
+    int   td  = 1;   // test duration in seconds
+    bool  fallback = false;
+    getopt(args, "tm", &tm, "dur", &td, "fallback", &fallback);
+
+
+    auto loop = getDefaultLoop(!fallback ? Mode.NATIVE : Mode.FALLBACK );
     auto client = new hlSocket();
     auto fd = client.open();
     assert(fd >= 0);
@@ -26,12 +32,13 @@ void main(string[] args){
         client.close();
     }
 
-    int tm = 1000;      // recv/send timeout in ms
-    int td  = 1;   // test duration in seconds
-    getopt(args, "tm", &tm, "dur", &td);
+    int counter = 0;
+    immutable limit = 2;
+    
     
     immutable(ubyte)[] input;
-    immutable(ubyte)[] output = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
+    immutable(ubyte)[] response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
+    string request = "GET / HTTP/1.1\r\nId: %d\r\n\r\n";
 
     void server_handler(hlSocket s) @safe {
         tracef("server accepted on %s", s.fileno());
@@ -42,10 +49,11 @@ void main(string[] args){
                 s.close();
                 return;
             }
-            writeln(r.input);
+            writeln(cast(string)r.input);
+            s.send(response);
             s.close();
         };
-        s.io(loop, iorq, dur!"seconds"(1));
+        s.io(loop, iorq, dur!"seconds"(10));
     }
 
     void client_handler(AppEvent e) @safe {
@@ -56,9 +64,25 @@ void main(string[] args){
             return;
         }
         tracef("sending to %s", client);
-        auto rc = client.send("abc\n".representation);
+        auto rc = client.send(request.format(counter).representation());
         tracef("send returned %d", rc);
-        client.close();
+        IORequest iorq;
+        iorq.to_read = 512;
+        iorq.callback = (IOResult r) {
+            if ( r.timedout ) {
+                info("Client timeout waiting for response");
+                client.close();
+                return;
+            }
+            writeln(cast(string)r.input);
+            client.close();
+            if ( ++counter < limit ) {
+                client = new hlSocket();
+                client.open();
+                client.connect("127.0.0.1:16000", loop, &client_handler, dur!"seconds"(5));
+            }
+        };
+        client.io(loop, iorq, 10.seconds);
     }
 
     auto server = new hlSocket();

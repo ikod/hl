@@ -32,8 +32,21 @@ extern(C) void sig_catcher(int signum) nothrow @nogc {
     last_signal[last_signal_index++] = signum;
 }
 
+private struct FileDescriptor {
+    package {
+        FileHandlerFunction _handler;
+        AppEvent            _polling = AppEvent.NONE;
+    }
+    string toString() const @safe {
+        import std.format: format;
+        return appeventToString(_polling);
+        //return "FileDescriptor: filehandle: %d, events: %s".format(_fileno, appeventToString(_polling));
+    }
+}
+
 struct FallbackEventLoopImpl {
     immutable string _name = "select";
+    immutable numberOfDescriptors = 1024;
 
     private {
         fd_set                  read_fds;
@@ -45,7 +58,7 @@ struct FallbackEventLoopImpl {
 
         Signal[][int]           signals;
 
-        FileDescriptor[int]     files;
+        FileDescriptor[numberOfDescriptors]    fileDescriptors;
 
         bool                    running = true;
     }
@@ -141,12 +154,16 @@ struct FallbackEventLoopImpl {
             FD_ZERO(&write_fds);
             FD_ZERO(&err_fds);
 
-            foreach(fd, descriptor; files) {
-                debug trace(descriptor.toString());
-                if ( descriptor._polling & AppEvent.IN ) {
+            foreach(int fd; 0..numberOfDescriptors) {
+                AppEvent e = fileDescriptors[fd]._polling;
+                if ( e == AppEvent.NONE ) {
+                    continue;
+                }
+                debug tracef("poll %d for %s", fd, fileDescriptors[fd]);
+                if ( e & AppEvent.IN ) {
                     FD_SET(fd, &read_fds);
                 }
-                if ( descriptor._polling & AppEvent.OUT ) {
+                if ( e & AppEvent.OUT ) {
                     FD_SET(fd, &write_fds);
                 }
                 fdmax = max(fdmax, fd);
@@ -237,14 +254,19 @@ struct FallbackEventLoopImpl {
                 } while (!timers.empty && timers.front._expires <= now );
             }
             if ( ready > 0 ) {
-                foreach(fd, descriptor; files) {
-                    if ( (descriptor._polling & AppEvent.IN) && FD_ISSET(fd, &read_fds) ) {
-                        //debug tracef("got IN event on file %d, descriptor: %s", fd, descriptor);
-                        descriptor._handler(AppEvent.IN);
+                foreach(int fd; 0..numberOfDescriptors) {
+                    AppEvent e = fileDescriptors[fd]._polling;
+                    if ( e == AppEvent.NONE ) {
+                        continue;
                     }
-                    if ( (descriptor._polling & AppEvent.OUT) && FD_ISSET(fd, &write_fds) ) {
-                        //debug tracef("got OUT event on file %d", fd);
-                        descriptor._handler(AppEvent.OUT);
+                    debug tracef("check %d for %s", fd, fileDescriptors[fd]);
+                    if ( e & AppEvent.IN && FD_ISSET(fd, &read_fds) ) {
+                        debug tracef("got IN event on file %d", fd);
+                        fileDescriptors[fd]._handler(fd, AppEvent.IN);
+                    }
+                    if ( e & AppEvent.OUT && FD_ISSET(fd, &write_fds) ) {
+                        debug tracef("got OUT event on file %d", fd);
+                        fileDescriptors[fd]._handler(fd, AppEvent.OUT);
                     }
                 }
             }
@@ -268,13 +290,21 @@ struct FallbackEventLoopImpl {
         auto r = timers.equalRange(t);
         timers.remove(r);
     }
-    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) pure nothrow @safe {
+    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) pure @safe {
+        enforce(fd >= 0, "fileno can't be negative");
+        enforce(fd < numberOfDescriptors, "Can't use such big fd, recompile with larger numberOfDescriptors");
+        debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
+        fileDescriptors[fd]._polling |= ev;
+        fileDescriptors[fd]._handler = f;
         //immutable fd = d._fileno;
         //d._polling |= ev;
         //files[fd] = d;
     }
     void stop_poll(int fd, AppEvent ev) @safe {
-    
+        enforce(fd >= 0, "fileno can't be negative");
+        enforce(fd < numberOfDescriptors, "Can't use such big fd, recompile with larger numberOfDescriptors");
+        debug tracef("stop poll on fd %d for events %s", fd, appeventToString(ev));
+        fileDescriptors[fd]._polling &= ev ^ AppEvent.ALL;
     }
     void flush() {
     }
