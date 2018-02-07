@@ -73,12 +73,12 @@ class NotFoundException : Exception {
 
 class CanPoll {
     union Id {
-        int     fd;
+        int     fd = -1;
     }
     Id  id;
 }
 
-final class Timer : CanPoll {
+final class Timer {
     private static ulong timer_id = 1;
     package {
         immutable ulong           _id;
@@ -122,7 +122,7 @@ final class Timer : CanPoll {
     }
 }
 
-final class Signal : CanPoll {
+final class Signal {
     private static ulong signal_id = 1;
     package {
         immutable int   _signum;

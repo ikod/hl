@@ -127,9 +127,11 @@ class hlSocket {
         if ( rc != 0 ) {
              throw new Exception(to!string(strerror(errno())));
         }
-        rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
-        if ( rc != 0 ) {
-             throw new Exception(to!string(strerror(errno())));
+        version(OSX) {
+            rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
+            if ( rc != 0 ) {
+                 throw new Exception(to!string(strerror(errno())));
+            }
         }
         auto flags = fcntl(_fileno, F_GETFL, 0) | O_NONBLOCK;
         fcntl(_fileno, F_SETFL, flags);
@@ -195,7 +197,7 @@ class hlSocket {
         loop.stopPoll(_fileno, _polling);
     }
 
-    public void connect(L, F)(string addr, L loop, scope F f, Duration timeout) @safe {
+    public void connect(F)(string addr, hlEvLoop loop, scope F f, Duration timeout) @safe {
          switch (_af) {
              case AF_INET:
                  {
@@ -228,7 +230,7 @@ class hlSocket {
         }
     }
 
-    public void accept(L, F)(L loop, scope F f) {
+    public void accept(F)(hlEvLoop loop, scope F f) {
         _handler = (scope AppEvent ev) @trusted {
             //
             // call accept until there is no more connections in the queue
@@ -256,9 +258,11 @@ class hlSocket {
                 if ( rc != 0 ) {
                      throw new Exception(to!string(strerror(errno())));
                 }
-                rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
-                if ( rc != 0 ) {
-                     throw new Exception(to!string(strerror(errno())));
+                version(OSX) {
+                    rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
+                    if ( rc != 0 ) {
+                         throw new Exception(to!string(strerror(errno())));
+                    }
                 }
                 auto flags = fcntl(new_s, F_GETFL, 0) | O_NONBLOCK;
                 fcntl(new_s, F_SETFL, flags);
@@ -366,7 +370,11 @@ class hlSocket {
             if ( ev & AppEvent.OUT ) {
                 debug tracef("sending %s", output);
                 assert(output.length>0);
-                auto rc = .send(_fileno, &output[0], output.length, 0);
+                uint flags = 0;
+                version(linux) {
+                    flags = MSG_NOSIGNAL;
+                }
+                auto rc = .send(_fileno, &output[0], output.length, flags);
                 if ( rc < 0 ) {
                     // error sending
                 }
