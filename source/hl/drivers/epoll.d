@@ -7,6 +7,10 @@ import std.string;
 import std.container;
 import std.exception;
 import std.experimental.logger;
+
+import std.experimental.allocator;
+import std.experimental.allocator.mallocator;
+
 import std.algorithm.comparison: max;
 import core.stdc.string: strerror;
 import core.stdc.errno: errno, EAGAIN;
@@ -19,6 +23,7 @@ import core.sys.posix.unistd: close, read;
 import core.sys.posix.time : itimerspec, CLOCK_MONOTONIC , timespec;
 
 import hl.events;
+import hl.common;
 
 struct NativeEventLoopImpl {
     immutable bool   native = true;
@@ -37,6 +42,8 @@ struct NativeEventLoopImpl {
         Timer[]                 overdue;    // timers added with expiration in past
         Signal[][int]           signals;
         FileHandlerFunction[int] fileHandlers;
+        EventHandler[]          handlers;
+
     }
     @disable this(this) {}
 
@@ -48,6 +55,7 @@ struct NativeEventLoopImpl {
             timer_fd = (() @trusted => timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK))();
         }
         timers = new RedBlackTree!Timer();
+        handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
     }
     void deinit() {
         close(epoll_fd);
@@ -55,6 +63,7 @@ struct NativeEventLoopImpl {
         close(timer_fd);
         timer_fd = -1;
         timers = null;
+        Mallocator.instance.dispose(handlers);
     }
 
     void stop() @safe {
@@ -116,13 +125,13 @@ struct NativeEventLoopImpl {
             foreach(i; 0..ready) {
                 auto e = events[i];
                 debug tracef("got event %s", e);
-                CanPoll p = cast(CanPoll)e.data.ptr;
+                int fd = e.data.fd;
 
-                if ( p !is null && p.id.fd == timer_fd ) {
+                if ( fd == timer_fd ) {
                     // with EPOLLET flag I dont have to read from timerfd, otherwise I ahve to:
                     // ubyte[8] v;
                     // read(timer_fd, &v[0], 8);
-
+                    debug tracef("timer event");
                     auto now = Clock.currTime;
                     /*
                      * Invariants for timers
@@ -156,7 +165,7 @@ struct NativeEventLoopImpl {
                     }
                     continue;
                 }
-                if ( p !is null && p.id.fd == signal_fd ) {
+                if ( fd == signal_fd ) {
                     enum siginfo_items = 8;
                     signalfd_siginfo[siginfo_items] info;
                     debug trace("got signal");
@@ -185,7 +194,15 @@ struct NativeEventLoopImpl {
                     }
                     continue;
                 }
-                //debug tracef("process %s", e.data.fd);
+                debug tracef("process event %02x on fd: %s", e.events, e.data.fd);
+                AppEvent ae;
+                if ( e.events & EPOLLIN ) {
+                    ae |= AppEvent.IN;
+                }
+                if ( e.events & EPOLLOUT ) {
+                    ae |= AppEvent.OUT;
+                }
+                handlers[fd].eventHandler(ae);
                 //HandlerDelegate h = cast(HandlerDelegate)e.data.ptr;
                 //AppEvent appEvent = AppEvent(sysEventToAppEvent(e.events), -1);
                 //h(appEvent);
@@ -194,7 +211,6 @@ struct NativeEventLoopImpl {
     }
     void start_timer(Timer t) @safe {
         debug tracef("insert timer %s", t);
-        t.id.fd = timer_fd;
         if ( timers.empty || t < timers.front ) {
             auto d = t._expires - Clock.currTime;
             d = max(d, 0.seconds);
@@ -245,7 +261,7 @@ struct NativeEventLoopImpl {
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
         e.events = EPOLLIN|EPOLLET;
-        e.data.ptr = cast(void*)t;
+        e.data.fd = timer_fd;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
     }
@@ -260,7 +276,7 @@ struct NativeEventLoopImpl {
         enforce(rc >= 0, "timerfd_settime(%s): %s".format(itimer, fromStringz(strerror(errno))));
         epoll_event e;
         e.events = EPOLLIN|EPOLLET;
-        e.data.ptr = cast(void*)t;
+        e.data.fd = timer_fd;
         rc = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, timer_fd, &e);
         enforce(rc >= 0);
     }
@@ -284,7 +300,6 @@ struct NativeEventLoopImpl {
             // enable signal only through kevent
             _add_kernel_signal(s);
         }
-        s.id.fd = signal_fd;
         signals[s._signum] ~= s;
     }
     void stop_signal(Signal s) {
@@ -321,7 +336,7 @@ struct NativeEventLoopImpl {
             signal_fd = signalfd(-1, &mask, SFD_NONBLOCK|SFD_CLOEXEC);
             epoll_event e;
             e.events = EPOLLIN|EPOLLET;
-            e.data.ptr = cast(void*)s;
+            e.data.fd = signal_fd;
             auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &e);
             enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
         } else {
@@ -343,17 +358,23 @@ struct NativeEventLoopImpl {
     //
     // files/sockets
     //
-    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @trusted {
+    void detach(int fd) @safe {
+        handlers[fd] = null;
+    }
+    void start_poll(int fd, AppEvent ev, EventHandler f) @trusted {
         epoll_event e;
         e.events = appEventToSysEvent(ev);
         e.data.fd = fd;
         auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
-        fileHandlers[fd] = f;
+        handlers[fd] = f;
     }
 
-    void stop_poll(int fd, AppEvent ev) @safe {
-
+    void stop_poll(int fd, AppEvent ev) @trusted {
+        epoll_event e;
+        e.events = appEventToSysEvent(ev);
+        e.data.fd = fd;
+        auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &e);
     }
     auto appEventToSysEvent(AppEvent ae) pure @safe {
         import core.bitop;

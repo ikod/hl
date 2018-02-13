@@ -113,6 +113,7 @@ unittest {
     auto loops = [native, fallb];
     foreach(loop; loops)
     {
+        globalLogLevel = LogLevel.info;
         infof(" --- '%s' loop ---", loop.name);
         i1 = i2 = 0;
         info("test start/stop timer before loop run");
