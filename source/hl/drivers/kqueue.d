@@ -8,6 +8,10 @@ import std.container;
 import std.stdio;
 import std.exception;
 import std.experimental.logger;
+
+import std.experimental.allocator;
+import std.experimental.allocator.mallocator;
+
 import std.algorithm.comparison: max;
 import core.sys.posix.fcntl: open, O_RDONLY;
 import core.sys.posix.unistd: close;
@@ -88,6 +92,8 @@ struct NativeEventLoopImpl {
 
         timespec    ts;
 
+        EventHandler[]          handlers;
+
     }
     void initialize() @trusted {
         if ( kqueue_fd == -1) {
@@ -95,13 +101,15 @@ struct NativeEventLoopImpl {
         }
         debug tracef("kqueue_fd=%d", kqueue_fd);
         timers = new RedBlackTree!Timer();
+        handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
     }
-    void deinit() @safe {
+    void deinit() @trusted {
         debug tracef("deinit");
         close(kqueue_fd);
         kqueue_fd = -1;
         in_index = 0;
         timers = null;
+        Mallocator.instance.dispose(handlers);
     }
     void stop() @nogc @safe pure nothrow {
         running = false;
@@ -189,8 +197,7 @@ struct NativeEventLoopImpl {
                             ae |= AppEvent.HUP;
                         }
                         int fd = cast(int)e.ident;
-                        auto callback = fileHandlers[fd];
-                        callback(fd, ae);
+                        handlers[fd].eventHandler(ae);
                         continue;
                     case EVFILT_WRITE:
                         debug tracef("Write on fd %d", e.ident);
@@ -202,8 +209,7 @@ struct NativeEventLoopImpl {
                             ae |= AppEvent.HUP;
                         }
                         int fd = cast(int)e.ident;
-                        auto callback = fileHandlers[fd];
-                        callback(fd, ae);
+                        handlers[fd].eventHandler(ae);
                         continue;
                     case EVFILT_TIMER:
                         /*
@@ -349,7 +355,22 @@ struct NativeEventLoopImpl {
         enforce(rc>=0, "flush: kevent %s, %s".format(fromStringz(strerror(errno)), in_events[0..in_index]));
         in_index = 0;
     }
-    void start_poll(int fd, AppEvent ev, FileHandlerFunction f) @safe {
+
+    bool fd_cleared_from_out_events(kevent_t e) @safe pure nothrow @nogc {
+        foreach(ref o; out_events[0..ready]) {
+            if ( o.ident == e.ident && o.filter == e.filter ) {
+                o.ident = 0;
+                o.filter = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void detach(int fd) @safe {
+        handlers[fd] = null;
+    }
+    void start_poll(int fd, AppEvent ev, EventHandler h) @safe {
         assert(fd>=0);
         immutable filter = appEventToSysEvent(ev);
         debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
@@ -361,7 +382,7 @@ struct NativeEventLoopImpl {
             flush();
         }
         in_events[in_index++] = e;
-        fileHandlers[fd] = f;
+        handlers[fd] = h;
     }
     void stop_poll(int fd, AppEvent ev) @safe {
         assert(fd>=0);
@@ -371,7 +392,7 @@ struct NativeEventLoopImpl {
         e.ident = fd;
         e.filter = filter;
         e.flags = EV_DELETE|EV_DISABLE;
-
+        fd_cleared_from_out_events(e);
         if ( in_index == MAXEVENTS ) {
             flush();
         }

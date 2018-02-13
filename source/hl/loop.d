@@ -32,9 +32,9 @@ final class hlEvLoop {
         @safe void delegate(Timer)          stopTimer;
         void delegate(Signal)         startSignal;
         void delegate(Signal)         stopSignal;
-        @safe void delegate(int, AppEvent, FileHandlerFunction)   startPoll;
-        @safe void delegate(int, AppEvent)                        stopPoll;
-
+        @safe void delegate(int, AppEvent, EventHandler)   startPoll;
+        @safe void delegate(int, AppEvent)                 stopPoll;
+        @safe void delegate(int) detach;
     public:
         string name() const pure nothrow @safe @property {
             return _name;
@@ -52,6 +52,7 @@ final class hlEvLoop {
                 stopSignal = &_nimpl.stop_signal;
                 startPoll = &_nimpl.start_poll;
                 stopPoll = &_nimpl.stop_poll;
+                detach = &_nimpl.detach;
                 break;
             case Mode.FALLBACK:
                 _name = _fimpl._name;
@@ -64,6 +65,7 @@ final class hlEvLoop {
                 stopSignal = &_fimpl.stop_signal;
                 startPoll = &_fimpl.start_poll;
                 stopPoll = &_fimpl.stop_poll;
+                detach = &_fimpl.detach;
                 break;
             default:
                 throw new Exception("Unknown mode");

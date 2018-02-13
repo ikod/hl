@@ -71,11 +71,15 @@ class NotFoundException : Exception {
 //    }
 //}
 
-class CanPoll {
-    union Id {
-        int     fd = -1;
-    }
-    Id  id;
+//class CanPoll {
+//    union Id {
+//        int     fd = -1;
+//    }
+//    Id  id;
+//}
+
+abstract class EventHandler {
+    abstract void eventHandler(AppEvent) @safe;
 }
 
 final class Timer {
@@ -149,10 +153,11 @@ final class Signal {
 
 struct IORequest {
     size_t              to_read = 0;
-    immutable           allowPartialInput = true;
+    bool                allowPartialInput = true;
     immutable(ubyte)[]  output;
 
     void delegate(IOResult) @safe callback;
+
 }
 
 struct IOResult {

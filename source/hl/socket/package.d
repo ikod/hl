@@ -45,18 +45,18 @@ static ~this() {
     trace("deinit");
 }
 
-hlSocket[int] fd2so;
-
-void loopCallback(int fd, AppEvent ev) @safe {
-    debug tracef("loopCallback for %d", fd);
-    hlSocket s = fd2so[fd];
-    if ( s && s._fileno >= 0) {
-        debug tracef("calling handler(%s) for %s", appeventToString(ev), s);
-        s._handler(ev);
-    } else {
-        infof("impossible event %s on fd: %d", appeventToString(ev), fd);
-    }
-}
+//hlSocket[int] fd2so;
+//
+//void loopCallback(int fd, AppEvent ev) @safe {
+//    debug tracef("loopCallback for %d", fd);
+//    hlSocket s = fd2so[fd];
+//    if ( s && s._fileno >= 0) {
+//        debug tracef("calling handler(%s) for %s", appeventToString(ev), s);
+//        s._handler(ev);
+//    } else {
+//        infof("impossible event %s on fd: %d", appeventToString(ev), fd);
+//    }
+//}
 
 class SocketException : Exception {
     this(string msg, string file = __FILE__, size_t line = __LINE__) @safe {
@@ -64,8 +64,15 @@ class SocketException : Exception {
     }
 }
 
-class hlSocket {
+class hlSocket : EventHandler {
     private {
+        enum State {
+            NEW = 0,
+            CONNECTING,
+            ACCEPTING,
+            IO,
+        }
+
         immutable ubyte      _af = AF_INET;
         immutable int        _sock_type = SOCK_STREAM;
         int                  _fileno = -1;
@@ -75,6 +82,16 @@ class hlSocket {
         hlEvLoop             _loop;
         immutable string     _file;
         immutable int        _line;
+        State                _state = State.NEW;
+        HandlerDelegate      _callback;
+        // accept related fields
+        void delegate(hlSocket) @safe _accept_callback;
+        // io related fields
+        IORequest            _iorq;
+        IOResult             _result;
+        Timer                _t;
+        AppEvent             _pollingFor = AppEvent.NONE;
+        ubyte[]              _input;
     }
 
     this(ubyte af = AF_INET, int sock_type = SOCK_STREAM, string f = __FILE__, int l =  __LINE__) @safe {
@@ -85,7 +102,7 @@ class hlSocket {
         _line = l;
     }
 
-    this(ubyte af, int sock_type, int s, string f = __FILE__, int l =  __LINE__)
+    this(ubyte af, int sock_type, int s, string f = __FILE__, int l =  __LINE__) @safe
     in {assert(s>=0);}
     body {
         _af = af;
@@ -93,8 +110,8 @@ class hlSocket {
         _fileno = s;
         _file = f;
         _line = l;
-        auto flags = fcntl(_fileno, F_GETFL, 0) | O_NONBLOCK;
-        fcntl(_fileno, F_SETFL, flags);
+        auto flags = (() @trusted => fcntl(_fileno, F_GETFL, 0) | O_NONBLOCK)();
+        (() @trusted => fcntl(_fileno, F_SETFL, flags))();
     }
 
 
@@ -113,6 +130,63 @@ class hlSocket {
         return _fileno;
     }
 
+    override void eventHandler(AppEvent e) @safe {
+        debug tracef("event %s in state %s", appeventToString(e), _state);
+        final switch ( _state ) {
+        case State.NEW:
+            assert(0);
+        case State.CONNECTING:
+            debug tracef("connection event: %s", appeventToString(e));
+            assert(e == AppEvent.OUT, "We can handle only OUT event in connectiong state");
+            _polling = AppEvent.NONE;
+            _loop.stopPoll(_fileno, AppEvent.OUT);
+            _callback(e);
+            return;
+            //_handler(e);
+        case State.ACCEPTING:
+            assert(e == AppEvent.IN, "We can handle only IN event in accepting state");
+            enum ACCEPTS_IN_A_ROW = 10;
+            foreach(_; 0..ACCEPTS_IN_A_ROW) {
+                sockaddr sa;
+                uint sa_len = sa.sizeof;
+                int new_s = (() @trusted => .accept(_fileno, &sa, &sa_len))();
+                if ( new_s == -1 ) {
+                    auto err = errno();
+                    if ( err == EWOULDBLOCK || err == EAGAIN ) {
+                        // POSIX.1-2001 and POSIX.1-2008 allow
+                        // either error to be returned for this case, and do not require
+                        // these constants to have the same value, so a portable
+                        // application should check for both possibilities.
+                        break;
+                    }
+                    throw new Exception(s_strerror(err));
+                }
+                debug tracef("New socket fd: %d", new_s);
+                immutable int flag = 1;
+                auto rc = (() @trusted => .setsockopt(new_s, IPPROTO_TCP, TCP_NODELAY, &flag, flag.sizeof))();
+                if ( rc != 0 ) {
+                     throw new Exception(s_strerror(errno()));
+                }
+                version(OSX) {
+                    rc = (() @trusted => .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof))();
+                    if ( rc != 0 ) {
+                         throw new Exception(s_strerror(errno()));
+                    }
+                }
+                auto flags = (() @trusted => fcntl(new_s, F_GETFL, 0) | O_NONBLOCK)();
+                (() @trusted => fcntl(new_s, F_SETFL, flags))();
+                hlSocket ns = new hlSocket(_af, _sock_type, new_s);
+                //fd2so[new_s] = ns;
+                _accept_callback(ns);
+            }
+            //_handler(e);
+            return;
+        case State.IO:
+            io_handler(e);
+            return;
+        }
+    }
+
     public int open() @trusted {
         immutable flag = 1;
         if (_fileno != -1) {
@@ -122,7 +196,7 @@ class hlSocket {
         if ( _fileno < 0 )
             return _fileno;
         _polling = AppEvent.NONE;
-        fd2so[_fileno] = this;
+        //fd2so[_fileno] = this;
         auto rc = .setsockopt(_fileno, IPPROTO_TCP, TCP_NODELAY, &flag, flag.sizeof);
         if ( rc != 0 ) {
              throw new Exception(to!string(strerror(errno())));
@@ -144,8 +218,9 @@ class hlSocket {
             if ( _loop && _polling != AppEvent.NONE ) {
                 debug tracef("detach from polling for %s", appeventToString(_polling));
                 _loop.stopPoll(_fileno, _polling);
+                _loop.detach(_fileno);
             }
-            fd2so[_fileno] = null;
+            //fd2so[_fileno] = null;
             .close(_fileno);
             _fileno = -1;
         }
@@ -175,13 +250,13 @@ class hlSocket {
                          tracef("bind result: %d", rc);
                      }
                      if ( rc != 0 ) {
-                         throw new Exception(to!string(strerror(errno())));
+                         throw new SocketException(to!string(strerror(errno())));
                      }
                  }
                  break;
              case AF_UNIX:
              default:
-                 throw new Exception("unsupported address family");
+                 throw new SocketException("unsupported address family");
          }
     }
 
@@ -197,7 +272,7 @@ class hlSocket {
         loop.stopPoll(_fileno, _polling);
     }
 
-    public void connect(F)(string addr, hlEvLoop loop, scope F f, Duration timeout) @safe {
+    public void connect(string addr, hlEvLoop loop, HandlerDelegate f, Duration timeout) @safe {
          switch (_af) {
              case AF_INET:
                  {
@@ -215,189 +290,145 @@ class hlSocket {
                         f(AppEvent.ERR);
                         return;
                      }
-                     _handler = (AppEvent ev) {
-                        debug tracef("connection event: %s", appeventToString(ev));
-                        _polling = AppEvent.NONE;
-                        loop.stopPoll(_fileno, AppEvent.OUT);
-                        f(ev);
-                     };
-                    _polling |= AppEvent.OUT;
-                    loop.startPoll(_fileno, AppEvent.OUT, &loopCallback);
+                     _loop = loop;
+                     _state = State.CONNECTING;
+                     _callback = f;
+                     _polling |= AppEvent.OUT;
+                     loop.startPoll(_fileno, AppEvent.OUT, this);
                  }
                  break;
              default:
-                 throw new Exception("unsupported address family");
+                 throw new SocketException("unsupported address family");
         }
     }
 
-    public void accept(F)(hlEvLoop loop, scope F f) {
-        _handler = (scope AppEvent ev) @trusted {
-            //
-            // call accept until there is no more connections in the queue
-            // but no more than ACCEPTS_IN_A_ROW
-            //
-            enum ACCEPTS_IN_A_ROW = 10;
-            foreach(_; 0..ACCEPTS_IN_A_ROW) {
-                sockaddr sa;
-                uint sa_len = sa.sizeof;
-                int new_s = .accept(_fileno, &sa, &sa_len);
-                if ( new_s == -1 ) {
-                    auto err = errno();
-                    if ( err == EWOULDBLOCK || err == EAGAIN ) {
-                        // POSIX.1-2001 and POSIX.1-2008 allow
-                        // either error to be returned for this case, and do not require
-                        // these constants to have the same value, so a portable
-                        // application should check for both possibilities.
-                        break;
-                    }
-                    throw new Exception(to!string(strerror(err)));
-                }
-                debug tracef("New socket fd: %d", new_s);
-                immutable int flag = 1;
-                auto rc = .setsockopt(new_s, IPPROTO_TCP, TCP_NODELAY, &flag, flag.sizeof);
-                if ( rc != 0 ) {
-                     throw new Exception(to!string(strerror(errno())));
-                }
-                version(OSX) {
-                    rc = .setsockopt(_fileno, SOL_SOCKET, SO_NOSIGPIPE, &flag, flag.sizeof);
-                    if ( rc != 0 ) {
-                         throw new Exception(to!string(strerror(errno())));
-                    }
-                }
-                auto flags = fcntl(new_s, F_GETFL, 0) | O_NONBLOCK;
-                fcntl(new_s, F_SETFL, flags);
-                hlSocket ns = new hlSocket(_af, _sock_type, new_s);
-                fd2so[new_s] = ns;
-                f(ns);
-            }
-        };
-        //fd2Socket...
+    public void accept(T)(hlEvLoop loop, T f) {
+        _loop = loop;
+        _accept_callback = f;
+        _state = State.ACCEPTING;
         _polling |= AppEvent.IN;
-        loop.startPoll(_fileno, AppEvent.IN, &loopCallback);
+        loop.startPoll(_fileno, AppEvent.IN, this);
     }
 
+    void io_handler(AppEvent ev) @safe {
+        debug tracef("event %s on fd %d", appeventToString(ev), _fileno);
+        if ( ev == AppEvent.TMO ) {
+            debug tracef("io timedout");
+            _loop.stopPoll(_fileno, _pollingFor);
+            _polling = AppEvent.NONE;
+            delegate void() @trusted {
+                _result.input = assumeUnique(_input);
+            }();
+            //_result.output = _output;
+            _result.timedout = true;
+            _iorq.callback(_result);
+            return;
+        }
+        if ( ev & AppEvent.IN )
+        {
+            ubyte[] b = new ubyte[](min(_buffer_size, _iorq.to_read));
+            auto rc = (() @trusted => recv(_fileno, &b[0], _buffer_size, 0))();
+            debug tracef("recv on fd %d returned %d", _fileno, rc);
+            if ( rc < 0 )
+            {
+                _result.error = true;
+                _polling &= _pollingFor ^ AppEvent.ALL;
+                _loop.stopPoll(_fileno, _pollingFor);
+                if ( _t ) {
+                    _loop.stopTimer(_t);
+                    _t = null;
+                }
+                _result.input = (() @trusted => assumeUnique(_input))();
+                //_result.output = output;
+                _iorq.callback(_result);
+                return;
+            }
+            if ( rc > 0 )
+            {
+                debug tracef("adding data %s", b[0..rc]);
+                _input ~= b[0..rc];
+                b = null;
+                _iorq.to_read -= rc;
+                if ( _iorq.to_read == 0 || _iorq.allowPartialInput ) {
+                    _loop.stopPoll(_fileno, _pollingFor);
+                    _polling = AppEvent.NONE;
+                    if ( _t ) {
+                        _loop.stopTimer(_t);
+                        _t = null;
+                    }
+                    _result.input = (() @trusted => assumeUnique(_input))();
+                    //_result.output = output;
+                    _iorq.callback(_result);
+                    return;
+                }
+            }
+            if ( rc == 0 )
+            {
+                // socket closed
+                _loop.stopPoll(_fileno, _pollingFor);
+                if ( _t ) {
+                    _loop.stopTimer(_t);
+                    _t = null;
+                }
+                _result.input = (() @trusted => assumeUnique(_input))();
+                //_result.output = output;
+                _polling = AppEvent.NONE;
+                _iorq.callback(_result);
+                return;
+            }
+        }
+        if ( ev & AppEvent.OUT ) {
+            debug tracef("sending %s", _iorq.output);
+            assert(_iorq.output.length>0);
+            uint flags = 0;
+            version(linux) {
+                flags = MSG_NOSIGNAL;
+            }
+            auto rc = (() @trusted => .send(_fileno, &_iorq.output[0], _iorq.output.length, flags))();
+            if ( rc < 0 ) {
+                // error sending
+            }
+            _iorq.output = _iorq.output[rc..$];
+            if ( _iorq.output.length == 0 ) {
+                _loop.stopPoll(_fileno, _pollingFor);
+                if ( _t ) {
+                    _loop.stopTimer(_t);
+                    _t = null;
+                }
+                _result.input = (() @trusted => assumeUnique(_input))();
+                //_result.output = output;
+                _polling = AppEvent.NONE;
+                _iorq.callback(_result);
+                return;
+            }
+        }
+        else
+        {
+            debug tracef("Unhandled event on %d", _fileno);
+        }
+    
+    }
     auto io(hlEvLoop loop, in IORequest iorq, in Duration timeout) @safe {
-        IOResult result;
-
-        size_t              to_read = iorq.to_read;
-        ubyte[]             input;
-        immutable(ubyte)[]  output = iorq.output;
-
-        _loop = loop;
-        Timer t;
 
         AppEvent ev = AppEvent.NONE;
         if ( iorq.output && iorq.output.length ) {
             ev |= AppEvent.OUT;
         }
-        if ( to_read > 0 ) {
+        if ( iorq.to_read > 0 ) {
             ev |= AppEvent.IN;
-            input.reserve(to_read);
+            _input.reserve(iorq.to_read);
         }
-        immutable pollingFor = ev;
-        assert(pollingFor != AppEvent.NONE);
+        _pollingFor = ev;
+        assert(_pollingFor != AppEvent.NONE);
 
+        _loop = loop;
+        _iorq = iorq;
+        _state = State.IO;
         if ( timeout > 0.seconds ) {
-            HandlerDelegate terminate = (AppEvent e) @safe {
-                debug tracef("io timedout");
-                loop.stopPoll(_fileno, ev);
-                _polling = AppEvent.NONE;
-                delegate void() @trusted {
-                    result.input = assumeUnique(input);
-                }();
-                result.output = output;
-                result.timedout = true;
-                iorq.callback(result);
-            };
-            t = new Timer(timeout, terminate);
-            loop.startTimer(t);
+            _t = new Timer(timeout, &io_handler);
+            _loop.startTimer(_t);
         }
-        _handler = (AppEvent ev) @trusted {
-            debug tracef("event %s on fd %d", appeventToString(ev), _fileno);
-            if ( ev & AppEvent.IN )
-            {
-                ubyte[] b = new ubyte[](min(_buffer_size, to_read));
-                auto rc = .recv(_fileno, &b[0], _buffer_size, 0);
-                debug tracef("recv on fd %d returned %d", _fileno, rc);
-                if ( rc < 0 )
-                {
-                    result.error = true;
-                    _polling &= pollingFor ^ AppEvent.ALL;
-                    _loop.stopPoll(_fileno, pollingFor);
-                    if ( t ) {
-                        _loop.stopTimer(t);
-                        t = null;
-                    }
-                    result.input = assumeUnique(input);
-                    result.output = output;
-                    iorq.callback(result);
-                    return;
-                }
-                if ( rc > 0 )
-                {
-                    debug tracef("adding data %s", b[0..rc]);
-                    input ~= b[0..rc];
-                    b = null;
-                    to_read -= rc;
-                    if ( to_read == 0 || iorq.allowPartialInput ) {
-                        loop.stopPoll(_fileno, pollingFor);
-                        _polling = AppEvent.NONE;
-                        if ( t ) {
-                            loop.stopTimer(t);
-                            t = null;
-                        }
-                        result.input = assumeUnique(input);
-                        result.output = output;
-                        iorq.callback(result);
-                        return;
-                    }
-                }
-                if ( rc == 0 )
-                {
-                    // socket closed
-                    loop.stopPoll(_fileno, pollingFor);
-                    if ( t ) {
-                        loop.stopTimer(t);
-                        t = null;
-                    }
-                    result.input = assumeUnique(input);
-                    result.output = output;
-                    _polling = AppEvent.NONE;
-                    iorq.callback(result);
-                    return;
-                }
-            }
-            if ( ev & AppEvent.OUT ) {
-                debug tracef("sending %s", output);
-                assert(output.length>0);
-                uint flags = 0;
-                version(linux) {
-                    flags = MSG_NOSIGNAL;
-                }
-                auto rc = .send(_fileno, &output[0], output.length, flags);
-                if ( rc < 0 ) {
-                    // error sending
-                }
-                output = output[rc..$];
-                if ( output.length == 0 ) {
-                    loop.stopPoll(_fileno, pollingFor);
-                    if ( t ) {
-                        loop.stopTimer(t);
-                        t = null;
-                    }
-                    result.input = assumeUnique(input);
-                    result.output = output;
-                    _polling = AppEvent.NONE;
-                    iorq.callback(result);
-                    return;
-                }
-            }
-            else
-            {
-                debug tracef("Unhandled event on %d", _fileno);
-            }
-        };
-        loop.startPoll(_fileno, pollingFor, &loopCallback);
+        _loop.startPoll(_fileno, _pollingFor, this);
         return 0;
     }
 

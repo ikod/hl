@@ -59,11 +59,11 @@ void main(string[] args){
         in_iorq.callback = on_read;
         s.io(loop, in_iorq, dur!"msecs"(opt));
     }
-    void delegate(hlSocket) accept = (hlSocket s) {
+    void accept(hlSocket s) @safe {
         exchange(s);
-    };
+    }
     server.bind("127.0.0.1:16000");
     server.listen(500);
-    server.accept(loop, accept);
+    server.accept(loop, &accept);
     loop.run(dur!"seconds"(td));
 }
