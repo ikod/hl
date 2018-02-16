@@ -19,7 +19,7 @@ void main(string[] args){
     globalLogLevel = LogLevel.trace;
 
     int   tm = 1000;      // recv/send timeout in ms
-    int   td  = 1;   // test duration in seconds
+    int   td  = 20;   // test duration in seconds
     bool  fallback = false;
     getopt(args, "tm", &tm, "dur", &td, "fallback", &fallback);
 
@@ -44,16 +44,35 @@ void main(string[] args){
         tracef("server accepted on %s", s.fileno());
         IORequest iorq;
         iorq.to_read = 512;
+        //iorq.allowPartialInput = false;
         iorq.callback = (IOResult r) {
+            infof("server ioresult: %s", r);
             if ( r.timedout ) {
                 s.close();
                 return;
             }
             writeln(cast(string)r.input);
-            s.send(response);
-            s.close();
+            auto result = s.send(loop, response, 1.seconds,
+                (IOResult r){
+                    infof("io for send response completed: %s", r);
+                    s.close();
+                }
+            );
+            if ( result.error ) {
+                // error starting "send"
+                errorf("error sending response");
+                s.close();
+                return;
+            }
+            if ( result.output.empty ) {
+                // result output.empty means we sent all data
+                info("fast send completed");
+                s.close();
+                return;
+            }
+            info("io for send started");
         };
-        s.io(loop, iorq, dur!"seconds"(10));
+        s.io(loop, iorq, dur!"seconds"(5));
     }
 
     void client_handler(AppEvent e) @safe {
@@ -80,6 +99,8 @@ void main(string[] args){
                 client = new hlSocket();
                 client.open();
                 client.connect("127.0.0.1:16000", loop, &client_handler, dur!"seconds"(5));
+            } else {
+                loop.stop();
             }
         };
         client.io(loop, iorq, 10.seconds);

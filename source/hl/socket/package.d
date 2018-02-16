@@ -319,8 +319,11 @@ class hlSocket : EventHandler {
             delegate void() @trusted {
                 _result.input = assumeUnique(_input);
             }();
-            //_result.output = _output;
+            // return what we collected
+            _result.input = (() @trusted => assumeUnique(_input))();
+            // return timeout flag
             _result.timedout = true;
+            // make callback
             _iorq.callback(_result);
             return;
         }
@@ -357,10 +360,10 @@ class hlSocket : EventHandler {
                         _t = null;
                     }
                     _result.input = (() @trusted => assumeUnique(_input))();
-                    //_result.output = output;
                     _iorq.callback(_result);
                     return;
                 }
+                return;
             }
             if ( rc == 0 )
             {
@@ -371,7 +374,6 @@ class hlSocket : EventHandler {
                     _t = null;
                 }
                 _result.input = (() @trusted => assumeUnique(_input))();
-                //_result.output = output;
                 _polling = AppEvent.NONE;
                 _iorq.callback(_result);
                 return;
@@ -431,12 +433,62 @@ class hlSocket : EventHandler {
         _loop.startPoll(_fileno, _pollingFor, this);
         return 0;
     }
-
+    /**
+    * just send, no callbacks, no timeouts, nothing
+    * returns what os-level send returns
+    **/
     long send(immutable(ubyte)[] data) @trusted {
         return .send(_fileno, data.ptr, data.length, 0);
     }
-    void send(immutable(ubyte)[] data, Duration timeout) {
-    
+    /**************************************************************************
+     * Send data from data buffer
+     * input: data     - data to send
+     *        timeout  - how long to wait until timedout
+     *        callback - callback which accept IOResult
+     * 1. try to send as much as possible. If complete data sent, then return
+     *    IOresult with empty output and clean timeout and error fileds.
+     * 2. If we can't send complete buffer, then prepare io call and return 
+     *    nonempty result output.
+     * So at return user have to check:
+     * a) if result.error == true - send failed
+     * b) if result.data.empty - data send completed
+     * c) otherwise io call were issued, user will receive callback
+     **************************************************************************/
+    IOResult send(hlEvLoop loop, immutable(ubyte)[] data, Duration timeout, void delegate(IOResult) @safe callback) @safe {
+
+        enforce!SocketException(data.length > 0, "You must have non-empty 'data' when calling 'send'");
+
+        IOResult result;
+        result.output = data;
+
+        uint flags = 0;
+        version(linux) {
+            flags = MSG_NOSIGNAL;
+        }
+        auto rc = (() @trusted => .send(_fileno, &data[0], data.length, flags))();
+        if ( rc < 0 ) {
+            auto err = errno();
+            if ( err != EWOULDBLOCK && err != EAGAIN ) {
+                // case a.
+                result.error = true;
+                return result;
+            }
+            rc = 0; // like we didn't sent anything
+        }
+        enforce!SocketException(rc > 0, "send must not return 0");
+        data = data[rc..$];
+        result.output = data;
+        if ( result.output.empty ) {
+            // case b. send comleted
+            debug tracef("fast send to %d completed", _fileno);
+            return result;
+        }
+        // case c. - we have to use event loop
+        IORequest iorq;
+        iorq.output = data;
+        iorq.callback = callback;
+        io(loop, iorq, timeout);
+        return result;
     }
 }
 

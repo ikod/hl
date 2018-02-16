@@ -165,4 +165,8 @@ struct IOResult {
     immutable(ubyte)[]  output;     // updated output slice
     bool                timedout;   // if we timedout
     bool                error;      // if there was an error
+    string toString() const @trusted {
+        import std.format;
+        return "in:[%(%02X %)], out:[%(%02X %)], tmo: %s, error: %s".format(input, output, timedout?"yes":"no", error?"yes":"no");
+    }
 }
