@@ -83,6 +83,22 @@ unittest {
 }
 
 unittest {
+    info(" === test 'stop before start' ===");
+    // stop before start
+    auto native = new hlEvLoop();
+    auto fallb = new hlEvLoop(Mode.FALLBACK);
+    auto loops = [native, fallb];
+    foreach(loop; loops)
+    {
+        infof(" --- '%s' loop ---", loop.name);
+        auto now = Clock.currTime;
+        loop.stop();
+        loop.run(1.seconds);
+        assert(Clock.currTime - now < 1.seconds);
+    }
+}
+
+unittest {
     info(" === Testing timers ===");
 }
 @safe unittest {

@@ -63,7 +63,7 @@ struct FallbackEventLoopImpl {
 
         FileDescriptor[numberOfDescriptors]    fileDescriptors;
         EventHandler[]          handlers;
-        bool                    running = true;
+        bool                    stopped = false;
     }
 
     @disable this(this) {};
@@ -77,7 +77,7 @@ struct FallbackEventLoopImpl {
     }
     void stop() @safe {
         debug trace("mark eventloop as stopped");
-        running = false;
+        stopped = true;
     }
 
     /**
@@ -108,8 +108,6 @@ struct FallbackEventLoopImpl {
     }
     void run(Duration d) {
 
-        running = true;
-
         immutable bool runIndefinitely = (d == Duration.max);
         SysTime now = Clock.currTime;
         SysTime deadline;
@@ -122,8 +120,11 @@ struct FallbackEventLoopImpl {
 
         debug tracef("evl run %s",runIndefinitely? "indefinitely": "for %s".format(d));
 
+        scope(exit) {
+            stopped = false;
+        }
 
-        while (running) {
+        while (!stopped) {
 
             int fdmax = -1;
 
@@ -184,7 +185,7 @@ struct FallbackEventLoopImpl {
             } else
                 wait = _calculate_timeval(deadline, &tv);
 
-            //debug tracef("waiting for events %s", wait is null?"forewer":"%s".format(*wait));
+            //debug tracef("waiting for events %s", wait is null?"forever":"%s".format(*wait));
             auto ready = select(fdmax+1, &read_fds, &write_fds, &err_fds, wait);
             //debug tracef("returned %d events", ready);
             if ( ready < 0 && errno == EINTR ) {

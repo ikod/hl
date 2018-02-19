@@ -29,7 +29,7 @@ struct NativeEventLoopImpl {
     immutable bool   native = true;
     immutable string _name = "epoll";
     private {
-        bool                    running = true;
+        bool                    stopped = false;
         enum                    MAXEVENTS = 1024;
         int                     epoll_fd = -1;
         int                     timer_fd = -1;
@@ -67,7 +67,7 @@ struct NativeEventLoopImpl {
     }
 
     void stop() @safe {
-        running = false;
+        stopped = true;
     }
 
     int _calculate_timeout(SysTime deadline) {
@@ -80,7 +80,6 @@ struct NativeEventLoopImpl {
     **/
     void run(Duration d) {
 
-        running = true;
         immutable bool runIndefinitely = (d == Duration.max);
 
         /**
@@ -91,8 +90,12 @@ struct NativeEventLoopImpl {
         SysTime deadline = Clock.currTime + d;
         debug tracef("evl run %s",runIndefinitely? "indefinitely": "for %s".format(d));
 
+        scope ( exit )
+        {
+            stopped = false;
+        }
 
-        while( running ) {
+        while( !stopped ) {
 
             while (overdue.length > 0) {
                 // execute timers with requested negative delay

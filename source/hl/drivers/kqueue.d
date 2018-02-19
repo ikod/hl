@@ -74,7 +74,7 @@ struct NativeEventLoopImpl {
     immutable string _name = "kqueue";
     @disable this(this) {}
     private {
-        bool running = true;
+        bool stopped = false;
         enum MAXEVENTS = 512;
 
         int  kqueue_fd = -1;  // interface to kernel
@@ -112,7 +112,7 @@ struct NativeEventLoopImpl {
         Mallocator.instance.dispose(handlers);
     }
     void stop() @nogc @safe pure nothrow {
-        running = false;
+        stopped = true;
     }
 
     timespec _calculate_timespec(SysTime deadline) @safe {
@@ -127,7 +127,6 @@ struct NativeEventLoopImpl {
     }
 
     void run(Duration d) @safe {
-        running = true;
 
         immutable bool runIndefinitely = (d == Duration.max);
         SysTime     deadline;
@@ -139,7 +138,11 @@ struct NativeEventLoopImpl {
 
         debug tracef("evl run for %s", d);
 
-        while(running) {
+        scope(exit) {
+            stopped = false;
+        }
+
+        while(!stopped) {
 
             while (overdue.length > 0) {
                 // execute timers which user requested with negative delay
@@ -159,7 +162,7 @@ struct NativeEventLoopImpl {
                       null
                     : &ts;
 
-            debug tracef("waiting for %s", wait is null?"forewer":"%s".format(*wait));
+            debug tracef("waiting for %s", wait is null?"forever":"%s".format(*wait));
             debug tracef("waiting events %s", in_events[0..in_index]);
             ready = s_kevent(kqueue_fd,
                                 cast(kevent_t*)&in_events[0], in_index,
@@ -180,7 +183,7 @@ struct NativeEventLoopImpl {
             }
             //in_index = 0;
             foreach(i; 0..ready) {
-                if ( !running ) {
+                if ( stopped ) {
                     break;
                 }
                 auto e = out_events[i];
