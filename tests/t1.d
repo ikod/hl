@@ -59,7 +59,8 @@ void main(string[] args){
         in_iorq.callback = on_read;
         s.io(loop, in_iorq, dur!"msecs"(opt));
     }
-    void accept(hlSocket s) @safe {
+    void accept(int so) @safe {
+        auto s = new hlSocket(s);
         exchange(s);
     }
     server.bind("127.0.0.1:16000");

@@ -9,11 +9,13 @@ import std.experimental.logger;
 import hl.drivers;
 import hl.events;
 
+import core.sys.posix.sys.socket;
+
 enum Mode:int {NATIVE = 0, FALLBACK}
 
 private static hlEvLoop[Mode.FALLBACK+1] _defaultLoop;
 
-hlEvLoop getDefaultLoop(Mode mode = Mode.NATIVE) {
+hlEvLoop getDefaultLoop(Mode mode = Mode.NATIVE) @safe {
     if ( _defaultLoop[mode] is null ) {
         _defaultLoop[mode] = new hlEvLoop(mode);
     }
@@ -331,7 +333,8 @@ unittest {
         immutable(ubyte)[] response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".representation;
         string request = "GET / HTTP/1.1\r\nId: %d\r\n\r\n";
     
-        void server_handler(hlSocket s) @safe {
+        void server_handler(int so) @safe {
+            auto s = new hlSocket(so);
             tracef("server accepted on %s", s.fileno());
             IORequest iorq;
             iorq.to_read = 512;
@@ -348,13 +351,18 @@ unittest {
     
         void client_handler(AppEvent e) @safe {
             tracef("connection app handler");
-            if ( e & AppEvent.ERR ) {
-                infof("error on %s", client);
+            if ( e & (AppEvent.ERR|AppEvent.HUP) ) {
+                tracef("error on %s", client);
                 client.close();
                 return;
             }
             tracef("sending to %s", client);
             auto rc = client.send(request.format(resuests).representation());
+            if ( rc == -1 ) {
+                tracef("error on %s", client);
+                client.close();
+                return;
+            }
             tracef("send returned %d", rc);
             IORequest iorq;
             iorq.to_read = 512;
@@ -364,7 +372,7 @@ unittest {
                     client.close();
                     return;
                 }
-                // we received response
+                // client received response from server
                 responses++;
                 client.close();
                 if ( ++resuests < limit ) {
@@ -388,13 +396,19 @@ unittest {
         server.listen();
         server.accept(loop, &server_handler);
     
-        client = new hlSocket();
-        client.open();
         loop.startTimer(new Timer(50.msecs,  (AppEvent e) @safe {
+            client = new hlSocket();
+            client.open();
             client.connect("127.0.0.1:16000", loop, &client_handler, dur!"seconds"(5));
+        }));
+
+        loop.startTimer(new Timer(100.msecs,  (AppEvent e) @safe {
+            client = new hlSocket();
+            client.open();
+            client.connect("127.0.0.1:16001", loop, &client_handler, dur!"seconds"(5));
         }));
     
         loop.run(1.seconds);
-        assert(responses == limit);
+        assert(responses == limit, "%s != %s".format(responses, limit));
     }
 }

@@ -38,7 +38,7 @@ import hl;
 
 //alias Socket = RefCounted!SocketImpl;
 
-alias AcceptFunction = void function(hlSocket);
+alias AcceptFunction = void function(int fileno);
 alias AcceptDelegate = void delegate(hlSocket);
 
 static ~this() {
@@ -85,7 +85,7 @@ class hlSocket : EventHandler {
         State                _state = State.NEW;
         HandlerDelegate      _callback;
         // accept related fields
-        void delegate(hlSocket) @safe _accept_callback;
+        void delegate(int) @safe _accept_callback;
         // io related fields
         IORequest            _iorq;
         IOResult             _result;
@@ -102,7 +102,7 @@ class hlSocket : EventHandler {
         _line = l;
     }
 
-    this(ubyte af, int sock_type, int s, string f = __FILE__, int l =  __LINE__) @safe
+    this( int s, ubyte af = AF_INET, int sock_type = 0, string f = __FILE__, int l =  __LINE__) @safe
     in {assert(s>=0);}
     body {
         _af = af;
@@ -137,7 +137,7 @@ class hlSocket : EventHandler {
             assert(0);
         case State.CONNECTING:
             debug tracef("connection event: %s", appeventToString(e));
-            assert(e == AppEvent.OUT, "We can handle only OUT event in connectiong state");
+            assert(e & (AppEvent.OUT|AppEvent.HUP), "We can handle only OUT event in connectiong state");
             _polling = AppEvent.NONE;
             _loop.stopPoll(_fileno, AppEvent.OUT);
             _callback(e);
@@ -175,9 +175,10 @@ class hlSocket : EventHandler {
                 }
                 auto flags = (() @trusted => fcntl(new_s, F_GETFL, 0) | O_NONBLOCK)();
                 (() @trusted => fcntl(new_s, F_SETFL, flags))();
-                hlSocket ns = new hlSocket(_af, _sock_type, new_s);
+                //hlSocket ns = new hlSocket(_af, _sock_type, new_s);
                 //fd2so[new_s] = ns;
-                _accept_callback(ns);
+                //_accept_callback(ns);
+                _accept_callback(new_s);
             }
             //_handler(e);
             return;
