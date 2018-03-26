@@ -56,6 +56,7 @@ struct FallbackEventLoopImpl {
         fd_set                  write_fds;
         fd_set                  err_fds;
 
+        bool                    stopped = false;
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
 
@@ -63,16 +64,16 @@ struct FallbackEventLoopImpl {
 
         FileDescriptor[numberOfDescriptors]    fileDescriptors;
         EventHandler[]          handlers;
-        bool                    stopped = false;
+        CircBuff!Notification   notificationsQueue;
     }
 
     @disable this(this) {};
 
-    void initialize() @safe {
+    void initialize() @safe nothrow {
         timers = new RedBlackTree!Timer();
         handlers = new EventHandler[](1024);
     }
-    void deinit() {
+    void deinit() @safe {
         timers = null;
     }
     void stop() @safe {
@@ -128,6 +129,17 @@ struct FallbackEventLoopImpl {
 
             int fdmax = -1;
 
+            //
+            // handle user events(notifications)
+            //
+            auto counter = notificationsQueue.Size * 10;
+            while(!notificationsQueue.empty){
+                auto n = notificationsQueue.get();
+                n.handler();
+                counter--;
+                enforce(counter > 0, "Can't clear notificatioinsQueue");
+            }
+
             while (overdue.length > 0) {
                 // execute timers which user requested with negative delay
                 Timer t = overdue[0];
@@ -140,7 +152,9 @@ struct FallbackEventLoopImpl {
                     errorf("Uncaught exception: %s", e);
                 }
             }
-
+            if (stopped) {
+                break;
+            } 
 
             while ( !timers.empty && timers.front._expires <= now) {
                 debug tracef("processing overdue  %s, lag: %s", timers.front, Clock.currTime - timers.front._expires);
@@ -311,6 +325,30 @@ struct FallbackEventLoopImpl {
     }
     void detach(int fd) @safe {
         handlers[fd] = null;
+    }
+
+    pragma(inline)
+    void processNotification(Notification ue) @safe {
+        ue.handler();
+    }
+
+    void postNotification(Notification notification) @safe {
+        debug trace("posting notification");
+        if ( !notificationsQueue.full )
+        {
+            notificationsQueue.put(notification);
+            return;
+        }
+        // now try to find space for next notification
+        auto retries = 10 * notificationsQueue.Size;
+        while(notificationsQueue.full && retries > 0)
+        {
+            retries--;
+            auto _n = notificationsQueue.get();
+            processNotification(_n);
+        }
+        enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
+        notificationsQueue.put(notification);
     }
     void flush() {
     }

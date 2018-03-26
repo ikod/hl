@@ -43,11 +43,12 @@ struct NativeEventLoopImpl {
         Signal[][int]           signals;
         FileHandlerFunction[int] fileHandlers;
         EventHandler[]          handlers;
+        CircBuff!Notification   notificationsQueue;
 
     }
     @disable this(this) {}
 
-    void initialize() @safe {
+    void initialize() @safe nothrow {
         if ( epoll_fd == -1 ) {
             epoll_fd = (() @trusted  => epoll_create(MAXEVENTS))();
         }
@@ -57,7 +58,7 @@ struct NativeEventLoopImpl {
         timers = new RedBlackTree!Timer();
         handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
     }
-    void deinit() {
+    void deinit() @trusted {
         close(epoll_fd);
         epoll_fd = -1;
         close(timer_fd);
@@ -96,6 +97,17 @@ struct NativeEventLoopImpl {
         }
 
         while( !stopped ) {
+
+            //
+            // handle user events(notifications)
+            //
+            auto counter = notificationsQueue.Size * 10;
+            while(!notificationsQueue.empty){
+                auto n = notificationsQueue.get();
+                n.handler();
+                counter--;
+                enforce(counter > 0, "Can't clear notificatioinsQueue");
+            }
 
             while (overdue.length > 0) {
                 // execute timers with requested negative delay
@@ -290,6 +302,32 @@ struct NativeEventLoopImpl {
         e.data.fd = timer_fd;
         int rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, timer_fd, &e);
         enforce(rc >= 0, "epoll_ctl del(%s): %s".format(e, fromStringz(strerror(errno))));
+    }
+    //
+    // notifications
+    //
+    pragma(inline)
+    void processNotification(Notification ue) @safe {
+        ue.handler();
+    }
+
+    void postNotification(Notification notification) @safe {
+        debug trace("posting notification");
+        if ( !notificationsQueue.full )
+        {
+            notificationsQueue.put(notification);
+            return;
+        }
+        // now try to find space for next notification
+        auto retries = 10 * notificationsQueue.Size;
+        while(notificationsQueue.full && retries > 0)
+        {
+            retries--;
+            auto _n = notificationsQueue.get();
+            processNotification(_n);
+        }
+        enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
+        notificationsQueue.put(notification);
     }
 
     //

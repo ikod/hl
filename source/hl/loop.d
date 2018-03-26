@@ -15,7 +15,7 @@ enum Mode:int {NATIVE = 0, FALLBACK}
 
 private static hlEvLoop[Mode.FALLBACK+1] _defaultLoop;
 
-hlEvLoop getDefaultLoop(Mode mode = Mode.NATIVE) @safe {
+hlEvLoop getDefaultLoop(Mode mode = Mode.NATIVE) @safe nothrow {
     if ( _defaultLoop[mode] is null ) {
         _defaultLoop[mode] = new hlEvLoop(mode);
     }
@@ -28,20 +28,22 @@ final class hlEvLoop {
         FallbackEventLoopImpl         _fimpl;
         string                        _name;
     public:
-        void delegate(scope Duration) run;
-        @safe void delegate()               stop;
-        @safe void delegate(Timer)          startTimer;
-        @safe void delegate(Timer)          stopTimer;
-        void delegate(Signal)         startSignal;
-        void delegate(Signal)         stopSignal;
-        @safe void delegate(int, AppEvent, EventHandler)   startPoll;
-        @safe void delegate(int, AppEvent)                 stopPoll;
-        @safe void delegate(int) detach;
+        void delegate(scope Duration)                      run;
+        @safe void delegate()                              stop;
+        @safe void delegate(Timer)                         startTimer;
+        @safe void delegate(Timer)                         stopTimer;
+        void delegate(Signal)                              startSignal;
+        void delegate(Signal)                              stopSignal;
+        @safe void delegate(int, AppEvent, EventHandler)   startPoll; // start listening to some events
+        @safe void delegate(int, AppEvent)                 stopPoll;  // stop listening to some events
+        @safe void delegate(int)                           detach;    // detach file from loop
+        @safe void delegate(Notification)                  postNotification;
+        @safe void delegate()                              deinit;
     public:
         string name() const pure nothrow @safe @property {
             return _name;
         }
-        this(Mode m = Mode.NATIVE) @safe {
+        this(Mode m = Mode.NATIVE) @safe nothrow {
             switch(m) {
             case Mode.NATIVE:
                 _name = _nimpl._name;
@@ -55,6 +57,8 @@ final class hlEvLoop {
                 startPoll = &_nimpl.start_poll;
                 stopPoll = &_nimpl.stop_poll;
                 detach = &_nimpl.detach;
+                postNotification = &_nimpl.postNotification;
+                deinit = &_nimpl.deinit;
                 break;
             case Mode.FALLBACK:
                 _name = _fimpl._name;
@@ -68,9 +72,11 @@ final class hlEvLoop {
                 startPoll = &_fimpl.start_poll;
                 stopPoll = &_fimpl.stop_poll;
                 detach = &_fimpl.detach;
+                postNotification = &_fimpl.postNotification;
+                deinit = &_fimpl.deinit;
                 break;
             default:
-                throw new Exception("Unknown mode");
+                assert(0, "Unknown loop mode");
             }
         }
 }
@@ -82,6 +88,18 @@ unittest {
     auto fallback_loop = getDefaultLoop(Mode.FALLBACK);
     writefln("Native   event loop: %s", best_loop.name);
     writefln("Fallback event loop: %s", fallback_loop.name);
+}
+
+unittest {
+    info(" === test user events ===");
+    auto native = new hlEvLoop();
+    auto fallb = new hlEvLoop(Mode.FALLBACK);
+    auto loops = [native, fallb];
+    foreach(loop; loops)
+    {
+        auto ue = new Notification();
+        loop.postNotification(ue);
+    }
 }
 
 unittest {
@@ -290,6 +308,44 @@ unittest {
     globalLogLevel = savedloglevel;
 }
 
+unittest {
+    import std.stdio;
+    globalLogLevel = LogLevel.info;
+    info(" === Testing notifications ===");
+    auto native = new hlEvLoop();
+    auto fallb = new hlEvLoop(Mode.FALLBACK);
+    auto loops = [native, fallb];
+    foreach(loop; loops) {
+        infof("testing loop '%s'", loop.name);
+        int test_variable;
+        Notification n = new Notification();
+        //
+        // start timer to post notification in future
+        //
+        auto t = new Timer(1.msecs, (AppEvent e){
+            loop.postNotification(n);
+        });
+        loop.startTimer(t);
+        //
+        // create notification handler and
+        // subscribe it to n - nh will be called when timer post event
+        //
+        NotificationHandler nh;
+        nh = (Notification n) @safe scope {
+            test_variable++;
+            n.unsubscribe(nh);
+            loop.stop();
+        };
+        //
+        //
+        n.subscribe(nh);
+        //
+        // run event loop
+        //
+        loop.run(50.msecs);
+        assert(test_variable==1, "missed notification");
+    }
+}
 
 unittest {
     globalLogLevel = LogLevel.info;

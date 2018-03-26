@@ -33,6 +33,7 @@ static this() {
 alias HandlerDelegate = void delegate(AppEvent) @safe;
 alias SigHandlerDelegate = void delegate(int) @safe;
 alias FileHandlerFunction = void function(int, AppEvent) @safe;
+alias NotificationHandler = void delegate(Notification) @safe;
 
 string appeventToString(AppEvent ev) @safe pure {
     import std.format;
@@ -169,4 +170,130 @@ struct IOResult {
         import std.format;
         return "in:[%(%02X %)], out:[%(%02X %)], tmo: %s, error: %s".format(input, output, timedout?"yes":"no", error?"yes":"no");
     }
+}
+
+struct CircBuff(T) {
+    enum Size = 512;
+    private
+    {
+        ushort start=0, length = 0;
+        T[Size] queue;
+    }
+
+    invariant
+    {
+        assert(length<=Size);
+        assert(start<Size);
+    }
+
+    auto get() @safe
+    in
+    {
+        assert(!empty);
+    }
+    out
+    {
+        assert(!full);
+    }
+    do
+    {
+        enforce(!empty);
+        auto v = queue[start];
+        length--;
+        start = (++start) % Size;
+        return v;
+    }
+
+    void put(Notification ue) @safe
+    in
+    {
+        assert(!full);
+    }
+    out
+    {
+        assert(!empty);
+    }
+    do
+    {
+        enforce(!full);
+        queue[(start + length)%Size] = ue;
+        length++;
+    }
+    bool empty() const @safe @property @nogc nothrow {
+        return length == 0;
+    }
+    bool full() const @safe @property @nogc nothrow {
+        return length == Size;
+    }
+}
+
+class Notification {
+    import containers;
+    private SList!(void delegate(Notification) @safe) _subscribers;
+
+    void handler() @safe {
+        foreach(s; _subscribers) {
+            s(this);
+        }
+    }
+
+    void subscribe(void delegate(Notification) @safe s) @safe @nogc nothrow {
+        _subscribers ~= s;
+    }
+
+    void unsubscribe(void delegate(Notification) @safe s) @safe @nogc {
+        _subscribers.remove(s);        
+    }
+}
+
+
+@safe unittest {
+    import std.stdio;
+    class TestNotification : Notification {
+        int _v;
+        this(int v) {
+            _v = v;
+        }
+    }
+    
+    auto ueq = CircBuff!Notification();
+    assert(ueq.empty);
+    assert(!ueq.full);
+    foreach(i;0..ueq.Size) {
+        auto ue = new TestNotification(i);
+        ueq.put(ue);
+    }
+    assert(ueq.full);
+    foreach(n;0..ueq.Size) {
+        auto i = ueq.get();
+        assert(n==(cast(TestNotification)i)._v);
+    }
+    assert(ueq.empty);
+    foreach(i;0..ueq.Size) {
+        auto ue = new TestNotification(i);
+        ueq.put(ue);
+    }
+    assert(ueq.full);
+    foreach(n;0..ueq.Size) {
+        auto i = ueq.get();
+        assert(n==(cast(TestNotification)i)._v);
+    }
+    //
+    int testvar;
+    void d1(Notification n) @safe {
+        testvar++;
+        auto v = cast(TestNotification)n;
+    }
+    void d2(Notification n) {
+        testvar--;
+    }
+    auto n1 = new TestNotification(1);
+    n1.subscribe(&d1);
+    n1.subscribe(&d2);
+    n1.subscribe(&d1);
+    n1.handler();
+    assert(testvar==1);
+    n1.unsubscribe(&d2);
+    n1.handler();
+    assert(testvar==3);
 }

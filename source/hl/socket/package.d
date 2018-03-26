@@ -11,7 +11,7 @@ import std.algorithm.comparison: min;
 
 import std.experimental.logger;
 
-import core.memory: pureMalloc, pureFree, GC;
+import core.memory: pureMalloc, GC;
 import core.exception : onOutOfMemoryError;
 
 import std.experimental.allocator;

@@ -81,25 +81,25 @@ struct NativeEventLoopImpl {
         int  in_index;
         int  ready;
 
-        kevent_t[MAXEVENTS]      in_events;
-        kevent_t[MAXEVENTS]      out_events;
-
-        RedBlackTree!Timer       timers;
-        Timer[]                  overdue;    // timers added with expiration in past
-
-        Signal[][int]            signals;
-        FileHandlerFunction[int] fileHandlers;
-
         timespec    ts;
 
+        kevent_t[MAXEVENTS]     in_events;
+        kevent_t[MAXEVENTS]     out_events;
+
+        RedBlackTree!Timer      timers;    // this is timers contaiers
+        Timer[]                 overdue;   // timers added with expiration in past placed here
+
+        Signal[][int]           signals;   // this is signals container
+
         EventHandler[]          handlers;
+        CircBuff!Notification   notificationsQueue;
 
     }
-    void initialize() @trusted {
+    void initialize() @trusted nothrow {
         if ( kqueue_fd == -1) {
             kqueue_fd = kqueue();
         }
-        debug tracef("kqueue_fd=%d", kqueue_fd);
+        debug try{tracef("kqueue_fd=%d", kqueue_fd);}catch(Exception e){}
         timers = new RedBlackTree!Timer();
         handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
     }
@@ -111,7 +111,8 @@ struct NativeEventLoopImpl {
         timers = null;
         Mallocator.instance.dispose(handlers);
     }
-    void stop() @nogc @safe pure nothrow {
+    void stop() @safe pure {
+        debug trace("mark eventloop as stopped");
         stopped = true;
     }
 
@@ -143,7 +144,19 @@ struct NativeEventLoopImpl {
         }
 
         while(!stopped) {
-
+            //
+            // handle user events(notifications)
+            //
+            auto counter = notificationsQueue.Size * 10;
+            while(!notificationsQueue.empty){
+                auto n = notificationsQueue.get();
+                n.handler();
+                counter--;
+                enforce(counter > 0, "Can't clear notificatioinsQueue");
+            }
+            //
+            // handle overdue timers
+            //
             while (overdue.length > 0) {
                 // execute timers which user requested with negative delay
                 Timer t = overdue[0];
@@ -156,6 +169,9 @@ struct NativeEventLoopImpl {
                     errorf("Uncaught exception: %s", e.msg);
                 }
             }
+            if (stopped) {
+                break;
+            } 
             ts = _calculate_timespec(deadline);
 
             wait = runIndefinitely ?
@@ -181,7 +197,9 @@ struct NativeEventLoopImpl {
                 debug trace("kevent timedout and no events to process");
                 return;
             }
-            //in_index = 0;
+            //
+            // handle kernel events
+            //
             foreach(i; 0..ready) {
                 if ( stopped ) {
                     break;
@@ -347,6 +365,30 @@ struct NativeEventLoopImpl {
         d = max(d, 0.seconds);
         _mod_kernel_timer(timers.front, d);
         return;
+    }
+
+    pragma(inline)
+    void processNotification(Notification ue) @safe {
+        ue.handler();
+    }
+
+    void postNotification(Notification notification) @safe {
+        debug trace("posting notification");
+        if ( !notificationsQueue.full )
+        {
+            notificationsQueue.put(notification);
+            return;
+        }
+        // now try to find space for next notification
+        auto retries = 10 * notificationsQueue.Size;
+        while(notificationsQueue.full && retries > 0)
+        {
+            retries--;
+            auto _n = notificationsQueue.get();
+            processNotification(_n);
+        }
+        enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
+        notificationsQueue.put(notification);
     }
 
     void flush() @trusted {
