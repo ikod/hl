@@ -3,6 +3,7 @@ module hl.drivers.kqueue;
 version(OSX):
 
 import std.datetime;
+import std.conv;
 import std.string;
 import std.container;
 import std.stdio;
@@ -105,8 +106,11 @@ struct NativeEventLoopImpl {
     }
     void deinit() @trusted {
         debug tracef("deinit");
-        close(kqueue_fd);
-        kqueue_fd = -1;
+        if ( kqueue_fd != -1 )
+        {
+            close(kqueue_fd);
+            kqueue_fd = -1;
+        }
         in_index = 0;
         timers = null;
         Mallocator.instance.dispose(handlers);
@@ -376,7 +380,9 @@ struct NativeEventLoopImpl {
         debug trace("posting notification");
         if ( !notificationsQueue.full )
         {
+            debug trace("put notification");
             notificationsQueue.put(notification);
+            debug trace("put notification done");
             return;
         }
         // now try to find space for next notification
@@ -389,6 +395,7 @@ struct NativeEventLoopImpl {
         }
         enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
         notificationsQueue.put(notification);
+        debug trace("posting notification - done");
     }
 
     void flush() @trusted {

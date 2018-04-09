@@ -121,6 +121,9 @@ struct NativeEventLoopImpl {
                     errorf("Uncaught exception: %s", e);
                 }
             }
+            if (stopped) {
+                break;
+            }
 
             int timeout_ms = runIndefinitely ?
                 -1 :

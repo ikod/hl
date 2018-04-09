@@ -17,7 +17,7 @@ import core.exception : onOutOfMemoryError;
 import std.experimental.allocator;
 import std.experimental.allocator.building_blocks;
 
-static import std.socket;
+//static import std.socket;
 
 import core.sys.posix.sys.socket;
 import core.sys.posix.unistd;
