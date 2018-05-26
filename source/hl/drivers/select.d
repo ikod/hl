@@ -6,6 +6,7 @@ import std.experimental.logger;
 
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
+import std.typecons;
 
 import std.string;
 import std.algorithm.comparison: min, max;
@@ -63,7 +64,7 @@ struct FallbackEventLoopImpl {
         Signal[][int]           signals;
 
         FileDescriptor[numberOfDescriptors]    fileDescriptors;
-        EventHandler[]          handlers;
+        FileEventHandler[]      fileHandlers;
         CircBuff!Notification   notificationsQueue;
     }
 
@@ -71,7 +72,7 @@ struct FallbackEventLoopImpl {
 
     void initialize() @safe nothrow {
         timers = new RedBlackTree!Timer();
-        handlers = new EventHandler[](1024);
+        fileHandlers = new FileEventHandler[](1024);
     }
     void deinit() @safe {
         timers = null;
@@ -281,11 +282,11 @@ struct FallbackEventLoopImpl {
                     debug tracef("check %d for %s", fd, fileDescriptors[fd]);
                     if ( e & AppEvent.IN && FD_ISSET(fd, &read_fds) ) {
                         debug tracef("got IN event on file %d", fd);
-                        handlers[fd].eventHandler(AppEvent.IN);
+                        fileHandlers[fd].eventHandler(fd, AppEvent.IN);
                     }
                     if ( e & AppEvent.OUT && FD_ISSET(fd, &write_fds) ) {
                         debug tracef("got OUT event on file %d", fd);
-                        handlers[fd].eventHandler(AppEvent.OUT);
+                        fileHandlers[fd].eventHandler(fd, AppEvent.OUT);
                     }
                 }
             }
@@ -310,12 +311,12 @@ struct FallbackEventLoopImpl {
         timers.remove(r);
     }
 
-    void start_poll(int fd, AppEvent ev, EventHandler h) pure @safe {
+    void start_poll(int fd, AppEvent ev, FileEventHandler h) pure @safe {
         enforce(fd >= 0, "fileno can't be negative");
         enforce(fd < numberOfDescriptors, "Can't use such big fd, recompile with larger numberOfDescriptors");
         debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
         fileDescriptors[fd]._polling |= ev;
-        handlers[fd] = h;
+        fileHandlers[fd] = h;
     }
     void stop_poll(int fd, AppEvent ev) @safe {
         enforce(fd >= 0, "fileno can't be negative");
@@ -323,8 +324,20 @@ struct FallbackEventLoopImpl {
         debug tracef("stop poll on fd %d for events %s", fd, appeventToString(ev));
         fileDescriptors[fd]._polling &= ev ^ AppEvent.ALL;
     }
+
+    int get_kernel_id() @safe @nogc {
+        return -1;
+    }
+
+    void wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+    
+    }
+    void stop_wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+    
+    }
+
     void detach(int fd) @safe {
-        handlers[fd] = null;
+        fileHandlers[fd] = null;
     }
 
     pragma(inline)
@@ -332,7 +345,7 @@ struct FallbackEventLoopImpl {
         ue.handler();
     }
 
-    void postNotification(Notification notification) @safe {
+    void postNotification(Notification notification, Broadcast broadcast = No.broadcast) @safe {
         debug trace("posting notification");
         if ( !notificationsQueue.full )
         {

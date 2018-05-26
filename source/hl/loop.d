@@ -5,7 +5,7 @@ import std.datetime;
 import std.container;
 import std.exception;
 import std.experimental.logger;
-
+import std.typecons;
 import hl.drivers;
 import hl.events;
 
@@ -27,6 +27,7 @@ final class hlEvLoop {
         NativeEventLoopImpl           _nimpl;
         FallbackEventLoopImpl         _fimpl;
         string                        _name;
+
     public:
         void delegate(scope Duration)                      run;
         @safe void delegate()                              stop;
@@ -34,11 +35,16 @@ final class hlEvLoop {
         @safe void delegate(Timer)                         stopTimer;
         void delegate(Signal)                              startSignal;
         void delegate(Signal)                              stopSignal;
-        @safe void delegate(int, AppEvent, EventHandler)   startPoll; // start listening to some events
+        @safe void delegate(int, AppEvent, FileEventHandler)   startPoll; // start listening to some events
         @safe void delegate(int, AppEvent)                 stopPoll;  // stop listening to some events
         @safe void delegate(int)                           detach;    // detach file from loop
-        @safe void delegate(Notification)                  postNotification;
+        @safe void delegate(Notification, Broadcast)       postNotification;
         @safe void delegate()                              deinit;
+        @safe void delegate(int, FileEventHandler)         waitForUserEvent;
+        @safe void delegate(int, FileEventHandler)         stopWaitForUserEvent;
+        @safe @nogc int delegate()                         getKernelId;
+
+
     public:
         string name() const pure nothrow @safe @property {
             return _name;
@@ -59,6 +65,9 @@ final class hlEvLoop {
                 detach = &_nimpl.detach;
                 postNotification = &_nimpl.postNotification;
                 deinit = &_nimpl.deinit;
+                waitForUserEvent = &_nimpl.wait_for_user_event;
+                stopWaitForUserEvent = &_nimpl.stop_wait_for_user_event;
+                getKernelId = &_nimpl.get_kernel_id;
                 break;
             case Mode.FALLBACK:
                 _name = _fimpl._name;
@@ -74,6 +83,9 @@ final class hlEvLoop {
                 detach = &_fimpl.detach;
                 postNotification = &_fimpl.postNotification;
                 deinit = &_fimpl.deinit;
+                waitForUserEvent = &_fimpl.wait_for_user_event;
+                stopWaitForUserEvent = &_fimpl.stop_wait_for_user_event;
+                getKernelId = &_fimpl.get_kernel_id;
                 break;
             default:
                 assert(0, "Unknown loop mode");
@@ -98,7 +110,7 @@ unittest {
     foreach(loop; loops)
     {
         auto ue = new Notification();
-        loop.postNotification(ue);
+        loop.postNotification(ue, Yes.broadcast);
     }
 }
 
@@ -323,7 +335,7 @@ unittest {
         // start timer to post notification in future
         //
         auto t = new Timer(1.msecs, (AppEvent e){
-            loop.postNotification(n);
+            loop.postNotification(n, No.broadcast);
         });
         loop.startTimer(t);
         //

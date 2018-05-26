@@ -3,6 +3,12 @@ module hl.events;
 import std.datetime;
 import std.exception;
 import std.container;
+import std.experimental.logger;
+import std.typecons;
+import core.sync.mutex;
+import std.format;
+
+import hl.common;
 
 //import nbuff;
 
@@ -14,7 +20,8 @@ enum AppEvent : int {
     CONN = 0x08,
     HUP  = 0x10,
     TMO  = 0x20,
-    ALL  = 0x3f
+    USER = 0x40,
+    ALL  = 0x7f
 }
 private immutable string[int] _names;
 
@@ -26,7 +33,8 @@ static this() {
         4:"ERR",
         8:"CONN",
        16:"HUP",
-       32:"TMO"
+       32:"TMO",
+       64:"USER"
     ];
 }
 
@@ -34,6 +42,7 @@ alias HandlerDelegate = void delegate(AppEvent) @safe;
 alias SigHandlerDelegate = void delegate(int) @safe;
 alias FileHandlerFunction = void function(int, AppEvent) @safe;
 alias NotificationHandler = void delegate(Notification) @safe;
+alias FileHandlerDelegate = void delegate(int, AppEvent) @safe;
 
 string appeventToString(AppEvent ev) @safe pure {
     import std.format;
@@ -51,7 +60,13 @@ string appeventToString(AppEvent ev) @safe pure {
 }
 
 class NotFoundException : Exception {
-    this(string msg, string file = __FILE__, size_t line = __LINE__) {
+    this(string msg, string file = __FILE__, size_t line = __LINE__) @safe {
+        super(msg, file, line);
+    }
+}
+
+class NotImplementedException : Exception {
+    this(string msg, string file = __FILE__, size_t line = __LINE__) @safe {
         super(msg, file, line);
     }
 }
@@ -81,6 +96,10 @@ class NotFoundException : Exception {
 
 abstract class EventHandler {
     abstract void eventHandler(AppEvent) @safe;
+}
+
+abstract class FileEventHandler {
+    abstract void eventHandler(int, AppEvent) @safe;
 }
 
 final class Timer {
@@ -204,7 +223,7 @@ struct CircBuff(T) {
         return v;
     }
 
-    void put(Notification ue) @safe
+    void put(T v) @safe
     in
     {
         assert(!full);
@@ -216,7 +235,7 @@ struct CircBuff(T) {
     do
     {
         enforce(!full);
-        queue[(start + length)%Size] = ue;
+        queue[(start + length)%Size] = v;
         length++;
     }
     bool empty() const @safe @property @nogc nothrow {
@@ -227,12 +246,31 @@ struct CircBuff(T) {
     }
 }
 
+alias Broadcast = Flag!"broadcast";
+
+struct NotificationDelivery {
+    Notification _n;
+    Broadcast    _broadcast;
+}
+
 class Notification {
-    import containers;
+    import  containers;
+
     private SList!(void delegate(Notification) @safe) _subscribers;
 
-    void handler() @safe {
-        foreach(s; _subscribers) {
+    void handler(Broadcast broadcast = Yes.broadcast) @trusted {
+        debug tracef("Handle %s".format(broadcast));
+        if ( broadcast )
+        {
+            debug tracef("subscribers %s".format(_subscribers.range));
+            foreach(s; _subscribers.range) {
+                debug tracef("subscriber %s".format(&s));
+                s(this);
+                debug tracef("subscriber %s - done".format(&s));
+            }
+        } else
+        {
+            auto s = _subscribers.front;
             s(this);
         }
     }
@@ -242,11 +280,9 @@ class Notification {
     }
 
     void unsubscribe(void delegate(Notification) @safe s) @safe @nogc {
-        _subscribers.remove(s);        
+        _subscribers.remove(s);
     }
 }
-
-
 @safe unittest {
     import std.stdio;
     class TestNotification : Notification {
@@ -291,9 +327,68 @@ class Notification {
     n1.subscribe(&d1);
     n1.subscribe(&d2);
     n1.subscribe(&d1);
-    n1.handler();
+    n1.handler(Yes.broadcast);
     assert(testvar==1);
     n1.unsubscribe(&d2);
-    n1.handler();
+    n1.handler(Yes.broadcast);
     assert(testvar==3);
+}
+
+class Subscription {
+    NotificationChannel     _channel;
+    void delegate() @safe   _handler;
+    shared this(shared NotificationChannel c, void delegate() @safe h) @safe nothrow {
+        _channel = c;
+        _handler = h;
+    }
+}
+
+//private shared int shared_notifications_id;
+//shared class SharedNotification {
+//    import containers;
+//    import core.atomic;
+//    private {
+//        int                     _n_id;
+//        //private shared SList!Subscription   _subscribers;
+//        private Subscription[]  _subscribers;
+//    }
+//
+//    shared this() @safe {
+//        _n_id = shared_notifications_id;
+//        atomicOp!"+="(shared_notifications_id, 1);
+//    }
+//
+//    void handler(Broadcast broadcast = Yes.broadcast) @safe {
+//        if ( broadcast )
+//        {
+//            //foreach(s; _subscribers) {
+//            //    s(this);
+//            //}
+//        } else
+//        {
+//            //auto s = _subscribers.front;
+//            //s(this);
+//        }
+//    }
+//
+//    void subscribe(NotificationChannel c, void delegate() @safe s) @safe nothrow shared {
+//        _subscribers ~= new shared Subscription(c, s);
+//    }
+//
+//    void unsubscribe(NotificationChannel c, void delegate() @safe s) @safe {
+//        //_subscribers.remove(Subscription(c, s));
+//    }
+//}
+
+
+@safe unittest {
+    //info("testing shared notifications");
+    //auto sna = new shared SharedNotification();
+    //auto snb = new shared SharedNotification();
+    //assert(sna._n_id == 0);
+    //assert(snb._n_id == 1);
+    //shared NotificationChannel c = new shared NotificationChannel;
+    //shared SharedNotification sn = new shared SharedNotification();
+    //sn.subscribe(c, delegate void() {});
+    //info("testing shared notifications - done");
 }

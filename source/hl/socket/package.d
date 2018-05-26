@@ -64,7 +64,7 @@ class SocketException : Exception {
     }
 }
 
-class hlSocket : EventHandler {
+class hlSocket : FileEventHandler {
     private {
         enum State {
             NEW = 0,
@@ -130,7 +130,7 @@ class hlSocket : EventHandler {
         return _fileno;
     }
 
-    override void eventHandler(AppEvent e) @safe {
+    override void eventHandler(int fd, AppEvent e) @safe {
         debug tracef("event %s in state %s", appeventToString(e), _state);
         final switch ( _state ) {
         case State.NEW:

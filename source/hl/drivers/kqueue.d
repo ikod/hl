@@ -9,7 +9,7 @@ import std.container;
 import std.stdio;
 import std.exception;
 import std.experimental.logger;
-
+import std.typecons;
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
 
@@ -92,9 +92,12 @@ struct NativeEventLoopImpl {
 
         Signal[][int]           signals;   // this is signals container
 
-        EventHandler[]          handlers;
-        CircBuff!Notification   notificationsQueue;
+        FileEventHandler[]      fileHandlers;
 
+        CircBuff!NotificationDelivery
+                                notificationsQueue;
+
+        HandlerDelegate[]       userEventHandlers;
     }
     void initialize() @trusted nothrow {
         if ( kqueue_fd == -1) {
@@ -102,7 +105,7 @@ struct NativeEventLoopImpl {
         }
         debug try{tracef("kqueue_fd=%d", kqueue_fd);}catch(Exception e){}
         timers = new RedBlackTree!Timer();
-        handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
+        fileHandlers = Mallocator.instance.makeArray!FileEventHandler(16*1024);
     }
     void deinit() @trusted {
         debug tracef("deinit");
@@ -113,7 +116,11 @@ struct NativeEventLoopImpl {
         }
         in_index = 0;
         timers = null;
-        Mallocator.instance.dispose(handlers);
+        Mallocator.instance.dispose(fileHandlers);
+        Mallocator.instance.dispose(userEventHandlers);
+    }
+    int get_kernel_id() pure @safe nothrow @nogc {
+        return kqueue_fd;
     }
     void stop() @safe pure {
         debug trace("mark eventloop as stopped");
@@ -153,8 +160,10 @@ struct NativeEventLoopImpl {
             //
             auto counter = notificationsQueue.Size * 10;
             while(!notificationsQueue.empty){
-                auto n = notificationsQueue.get();
-                n.handler();
+                auto nd = notificationsQueue.get();
+                Notification n = nd._n;
+                Broadcast b = nd._broadcast;
+                n.handler(b);
                 counter--;
                 enforce(counter > 0, "Can't clear notificatioinsQueue");
             }
@@ -222,7 +231,7 @@ struct NativeEventLoopImpl {
                             ae |= AppEvent.HUP;
                         }
                         int fd = cast(int)e.ident;
-                        handlers[fd].eventHandler(ae);
+                        fileHandlers[fd].eventHandler(cast(int)e.ident, ae);
                         continue;
                     case EVFILT_WRITE:
                         debug tracef("Write on fd %d", e.ident);
@@ -234,7 +243,7 @@ struct NativeEventLoopImpl {
                             ae |= AppEvent.HUP;
                         }
                         int fd = cast(int)e.ident;
-                        handlers[fd].eventHandler(ae);
+                        fileHandlers[fd].eventHandler(cast(int)e.ident, ae);
                         continue;
                     case EVFILT_TIMER:
                         /*
@@ -295,6 +304,9 @@ struct NativeEventLoopImpl {
                                 errorf("Uncaught exception: %s", e.msg);
                             }
                         }
+                        continue;
+                    case EVFILT_USER:
+                        handle_user_event(e);
                         continue;
                     default:
                         break;
@@ -371,17 +383,17 @@ struct NativeEventLoopImpl {
         return;
     }
 
-    pragma(inline)
-    void processNotification(Notification ue) @safe {
+    pragma(inline, true)
+    void processNotification(Notification ue, Broadcast broadcast) @safe {
         ue.handler();
     }
 
-    void postNotification(Notification notification) @safe {
+    void postNotification(Notification notification, Broadcast broadcast = No.broadcast) @safe {
         debug trace("posting notification");
         if ( !notificationsQueue.full )
         {
             debug trace("put notification");
-            notificationsQueue.put(notification);
+            notificationsQueue.put(NotificationDelivery(notification, broadcast));
             debug trace("put notification done");
             return;
         }
@@ -390,11 +402,13 @@ struct NativeEventLoopImpl {
         while(notificationsQueue.full && retries > 0)
         {
             retries--;
-            auto _n = notificationsQueue.get();
-            processNotification(_n);
+            auto nd = notificationsQueue.get();
+            Notification _n = nd._n;
+            Broadcast _b = nd._broadcast;
+            processNotification(_n, _b);
         }
         enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
-        notificationsQueue.put(notification);
+        notificationsQueue.put(NotificationDelivery(notification, broadcast));
         debug trace("posting notification - done");
     }
 
@@ -420,9 +434,9 @@ struct NativeEventLoopImpl {
     }
 
     void detach(int fd) @safe {
-        handlers[fd] = null;
+        fileHandlers[fd] = null;
     }
-    void start_poll(int fd, AppEvent ev, EventHandler h) @safe {
+    void start_poll(int fd, AppEvent ev, FileEventHandler h) @safe {
         assert(fd>=0);
         immutable filter = appEventToSysEvent(ev);
         debug tracef("start poll on fd %d for events %s", fd, appeventToString(ev));
@@ -434,7 +448,7 @@ struct NativeEventLoopImpl {
             flush();
         }
         in_events[in_index++] = e;
-        handlers[fd] = h;
+        fileHandlers[fd] = h;
     }
     void stop_poll(int fd, AppEvent ev) @safe {
         assert(fd>=0);
@@ -450,6 +464,47 @@ struct NativeEventLoopImpl {
         }
         in_events[in_index++] = e;
         flush();
+    }
+
+    pragma(inline, true)
+    void handle_user_event(kevent_t e) @safe {
+        import core.thread;
+        debug tracef("Got user event thread.id:%s event.id:%d", Thread.getThis().id(), e.ident);
+        disable_user_event(e);
+        auto h = fileHandlers[e.ident];
+        h.eventHandler(kqueue_fd, AppEvent.USER);
+    }
+
+    void wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+        debug tracef("start waiting for user_event %s", event_id);
+        fileHandlers[event_id] = handler;
+        kevent_t e;
+        e.ident = event_id;
+        e.filter = EVFILT_USER;
+        e.flags = EV_ADD;
+        if ( in_index == MAXEVENTS ) {
+            flush();
+        }
+        in_events[in_index++] = e;
+    }
+    void stop_wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+        debug tracef("start waiting for user_event %s", event_id);
+        fileHandlers[event_id] = null;
+        kevent_t e;
+        e.ident = event_id;
+        e.filter = EVFILT_USER;
+        e.flags = EV_DELETE;
+        if ( in_index == MAXEVENTS ) {
+            flush();
+        }
+        in_events[in_index++] = e;
+    }
+    void disable_user_event(kevent_t e) @safe {
+        e.flags = EV_DISABLE;
+        if ( in_index == MAXEVENTS ) {
+            flush();
+        }
+        in_events[in_index++] = e;
     }
     void _add_kernel_timer(in Timer t, in Duration d) @trusted {
         debug tracef("add kernel timer %s, delta %s", t, d);

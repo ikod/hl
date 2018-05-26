@@ -7,6 +7,7 @@ import std.string;
 import std.container;
 import std.exception;
 import std.experimental.logger;
+import std.typecons;
 
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
@@ -41,9 +42,9 @@ struct NativeEventLoopImpl {
         RedBlackTree!Timer      timers;
         Timer[]                 overdue;    // timers added with expiration in past
         Signal[][int]           signals;
-        FileHandlerFunction[int] fileHandlers;
-        EventHandler[]          handlers;
-        CircBuff!Notification   notificationsQueue;
+        //FileHandlerFunction[int] fileHandlers;
+        FileEventHandler[]      fileHandlers;
+        CircBuff!NotificationDelivery   notificationsQueue;
 
     }
     @disable this(this) {}
@@ -56,7 +57,7 @@ struct NativeEventLoopImpl {
             timer_fd = (() @trusted => timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK))();
         }
         timers = new RedBlackTree!Timer();
-        handlers = Mallocator.instance.makeArray!EventHandler(16*1024);
+        fileHandlers = Mallocator.instance.makeArray!FileEventHandler(16*1024);
     }
     void deinit() @trusted {
         close(epoll_fd);
@@ -64,7 +65,7 @@ struct NativeEventLoopImpl {
         close(timer_fd);
         timer_fd = -1;
         timers = null;
-        Mallocator.instance.dispose(handlers);
+        Mallocator.instance.dispose(fileHandlers);
     }
 
     void stop() @safe {
@@ -103,11 +104,20 @@ struct NativeEventLoopImpl {
             //
             auto counter = notificationsQueue.Size * 10;
             while(!notificationsQueue.empty){
-                auto n = notificationsQueue.get();
-                n.handler();
+                auto nd = notificationsQueue.get();
+                Notification n = nd._n;
+                Broadcast b = nd._broadcast;
+                n.handler(b);
                 counter--;
                 enforce(counter > 0, "Can't clear notificatioinsQueue");
             }
+            //auto counter = notificationsQueue.Size * 10;
+            //while(!notificationsQueue.empty){
+            //    auto n = notificationsQueue.get();
+            //    n.handler();
+            //    counter--;
+            //    enforce(counter > 0, "Can't clear notificatioinsQueue");
+            //}
 
             while (overdue.length > 0) {
                 // execute timers with requested negative delay
@@ -212,7 +222,6 @@ struct NativeEventLoopImpl {
                     }
                     continue;
                 }
-                debug tracef("process event %02x on fd: %s", e.events, e.data.fd);
                 AppEvent ae;
                 if ( e.events & EPOLLIN ) {
                     ae |= AppEvent.IN;
@@ -220,7 +229,12 @@ struct NativeEventLoopImpl {
                 if ( e.events & EPOLLOUT ) {
                     ae |= AppEvent.OUT;
                 }
-                handlers[fd].eventHandler(ae);
+                debug tracef("process event %02x on fd: %s, handler: %s", e.events, e.data.fd, fileHandlers[fd]);
+                try {
+                    fileHandlers[fd].eventHandler(e.data.fd, ae);
+                } catch (Exception e) {
+                    errorf("On file handler: %s", e);
+                }
                 //HandlerDelegate h = cast(HandlerDelegate)e.data.ptr;
                 //AppEvent appEvent = AppEvent(sysEventToAppEvent(e.events), -1);
                 //h(appEvent);
@@ -310,15 +324,16 @@ struct NativeEventLoopImpl {
     // notifications
     //
     pragma(inline)
-    void processNotification(Notification ue) @safe {
-        ue.handler();
+    void processNotification(Notification ue, Broadcast broadcast) @safe {
+        ue.handler(broadcast);
     }
-
-    void postNotification(Notification notification) @safe {
+    void postNotification(Notification notification, Broadcast broadcast = No.broadcast) @safe {
         debug trace("posting notification");
         if ( !notificationsQueue.full )
         {
-            notificationsQueue.put(notification);
+            debug trace("put notification");
+            notificationsQueue.put(NotificationDelivery(notification, broadcast));
+            debug trace("put notification done");
             return;
         }
         // now try to find space for next notification
@@ -326,12 +341,37 @@ struct NativeEventLoopImpl {
         while(notificationsQueue.full && retries > 0)
         {
             retries--;
-            auto _n = notificationsQueue.get();
-            processNotification(_n);
+            auto nd = notificationsQueue.get();
+            Notification _n = nd._n;
+            Broadcast _b = nd._broadcast;
+            processNotification(_n, _b);
         }
         enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
-        notificationsQueue.put(notification);
+        notificationsQueue.put(NotificationDelivery(notification, broadcast));
+        debug trace("posting notification - done");
     }
+
+
+    //void postNotification(Notification notification, Broadcast broadcast = No.broadcast) @safe {
+    //    debug trace("posting notification");
+    //    if ( !notificationsQueue.full )
+    //    {
+    //        notificationsQueue.put(NotificationDelivery(notification, broadcast));
+    //        return;
+    //    }
+    //    // now try to find space for next notification
+    //    auto retries = 10 * notificationsQueue.Size;
+    //    while(notificationsQueue.full && retries > 0)
+    //    {
+    //        retries--;
+    //        auto nd = notificationsQueue.get();
+    //        Notification _n = nd._n;
+    //        Broadcast _b = nd._broadcast;
+    //        processNotification(_n, _b);
+    //    }
+    //    enforce(!notificationsQueue.full, "Can't clear space for next notification in notificatioinsQueue");
+    //    notificationsQueue.put(NotificationDelivery(notification, broadcast));
+    //}
 
     //
     // signals
@@ -398,20 +438,39 @@ struct NativeEventLoopImpl {
         assert(signal_fd != -1);
         signalfd(signal_fd, &mask, 0);
     }
+    void wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+        epoll_event e;
+        e.events = EPOLLIN;
+        e.data.fd = event_id;
+        auto rc = (() @trusted => epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event_id, &e))();
+        enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, s_strerror(errno)));
+        fileHandlers[event_id] = handler;
+    }
+    void stop_wait_for_user_event(int event_id, FileEventHandler handler) @safe {
+        epoll_event e;
+        e.events = EPOLLIN;
+        e.data.fd = event_id;
+        auto rc = (() @trusted => epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event_id, &e))();
+        fileHandlers[event_id] = null;
+    }
+
+    int get_kernel_id() pure @safe nothrow @nogc {
+        return epoll_fd;
+    }
 
     //
     // files/sockets
     //
     void detach(int fd) @safe {
-        handlers[fd] = null;
+        fileHandlers[fd] = null;
     }
-    void start_poll(int fd, AppEvent ev, EventHandler f) @trusted {
+    void start_poll(int fd, AppEvent ev, FileEventHandler f) @trusted {
         epoll_event e;
         e.events = appEventToSysEvent(ev);
         e.data.fd = fd;
         auto rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &e);
         enforce(rc >= 0, "epoll_ctl add(%s): %s".format(e, fromStringz(strerror(errno))));
-        handlers[fd] = f;
+        fileHandlers[fd] = f;
     }
 
     void stop_poll(int fd, AppEvent ev) @trusted {
